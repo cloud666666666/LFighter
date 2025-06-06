@@ -1,0 +1,10 @@
+torch
+numpy
+scikit-learn
+matplotlib
+tqdm
+pandas
+medmnist
+tensorflow
+hdbscan
+torchvision 

@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.swp
+*.swo
+
+# 虚拟环境
+.venv/
+venv/
+ENV/
+env/
+
+# 日志和结果
+*.log
+log/
+experiment.log
+
+# 检查点和中间结果
+checkpoints/
+results/
+figures/
+
+# 数据
+data/
+*.h5
+*.npz
+*.npy
+*.csv
+
+# Jupyter notebook checkpoints
+.ipynb_checkpoints/
+
+# 系统文件
+.DS_Store
+Thumbs.db

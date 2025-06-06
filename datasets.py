@@ -1,5 +1,6 @@
 import torch
 from torch.utils import data
+import numpy as np
 
 
 class CustomDataset(data.Dataset):
@@ -12,6 +13,15 @@ class CustomDataset(data.Dataset):
             
     def __getitem__(self, index):
         x, y = self.dataset[int(self.indices[index])][0], self.dataset[int(self.indices[index])][1]
+        if isinstance(y, torch.Tensor):
+            y = y.item()
+        elif isinstance(y, np.ndarray):
+            if y.ndim > 0 and y.size > 1:
+                y = int(np.argmax(y))
+            else:
+                y = int(y)
+        else:
+            y = int(y)
         if y == self.source_class:
             y = self.target_class 
         return x, y 
@@ -27,6 +37,15 @@ class PoisonedDataset(data.Dataset):
             
     def __getitem__(self, index):
         x, y = self.dataset[index][0], self.dataset[index][1]
+        if isinstance(y, torch.Tensor):
+            y = y.item()
+        elif isinstance(y, np.ndarray):
+            if y.ndim > 0 and y.size > 1:
+                y = int(np.argmax(y))
+            else:
+                y = int(y)
+        else:
+            y = int(y)
         if y == self.source_class:
             y = self.target_class 
         return x, y 

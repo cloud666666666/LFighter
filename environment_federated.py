@@ -14,7 +14,7 @@ from sampling import *
 from datasets import *
 import os
 import random
-from tqdm import tqdm_notebook
+from tqdm import tqdm
 import copy
 from operator import itemgetter
 import time
@@ -22,6 +22,7 @@ from random import shuffle
 from aggregation import *
 from IPython.display import clear_output
 import gc
+import logging
 
 class Peer():
     # Class variable shared among all the instances
@@ -84,9 +85,9 @@ class Peer():
                     target = target.view(-1,1) * (1 - attacked)
 
                 data, target = data.to(self.device), target.to(self.device)
-                # for CIFAR10 multi-LF attack
-                # if attacked:
-                #     target = (target + 1)%10
+                if target.ndim > 1:
+                    target = target.argmax(dim=-1)
+
                 output = model(data)
                 loss = self.criterion(output, target)
                 loss.backward()    
@@ -231,6 +232,8 @@ class FL:
                 pred = output > 0.5 # get the index of the max log-probability
                 correct+= pred.eq(target.view_as(pred)).sum().item()
             else:
+                if target.ndim > 1:
+                    target = target.argmax(dim=-1)
                 test_loss.append(self.criterion(output, target).item()) # sum up batch loss
                 pred = output.argmax(dim=1, keepdim=True) # get the index of the max log-probability
                 correct+= pred.eq(target.view_as(pred)).sum().item()
@@ -272,7 +275,11 @@ class FL:
 
         
     def run_experiment(self, attack_type = 'no_attack', malicious_behavior_rate = 0,
-        source_class = None, target_class = None, rule = 'fedavg', resume = False):
+        source_class = None, target_class = None, rule = 'fedavg', resume = False, log_file="experiment.log"):
+        logging.basicConfig(filename=log_file,
+                            filemode='a',
+                            format='%(asctime)s %(message)s',
+                            level=logging.INFO)
         simulation_model = copy.deepcopy(self.global_model)
         print('\n===>Simulation started...')
         lfd = LFD(self.num_classes)
@@ -303,7 +310,7 @@ class FL:
             
             print('>>checkpoint loaded!')
         print("\n====>Global model training started...\n")
-        for epoch in tqdm_notebook(range(start_round, self.global_rounds)):
+        for epoch in tqdm(range(start_round, self.global_rounds)):
             gc.collect()
             torch.cuda.empty_cache()
             
@@ -466,6 +473,25 @@ class FL:
                     if i == source_class:
                         source_class_accuracies.append(np.round(r[i]/np.sum(r)*100, 2))
                         asr = np.round(r[target_class]/np.sum(r)*100, 2)
+
+            # 每轮训练结束后写日志
+            log_msg = (
+                f"Round {epoch+1}/{self.global_rounds} | "
+                f"Global Acc: {current_accuracy:.2f} | "
+                f"Test Loss: {test_loss:.4f} | "
+                f"Attacks: {attacks} | "
+                f"Source Class Acc: {source_class_accuracies[-1] if source_class_accuracies else 'N/A'}"
+            )
+            print(log_msg)
+            logging.info(log_msg)
+
+        # 实验结束后写最终结果
+        final_msg = (
+            f"Experiment End | Rule: {rule} | Global Accuracies: {global_accuracies} | "
+            f"Source Class Accuracies: {source_class_accuracies} | Test Losses: {test_losses}"
+        )
+        print(final_msg)
+        logging.info(final_msg)
 
         state = {
                 'state_dict': simulation_model.state_dict(),

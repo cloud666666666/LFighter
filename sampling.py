@@ -9,6 +9,23 @@ import codecs
 import tensorflow as tf 
 import pandas as pd
 from datasets import *
+from medmnist import PathMNIST
+from medmnist import INFO
+
+#添加PATHMNIST加载函数
+def get_pathmnist():
+    import torchvision.transforms as transforms
+    data_flag = 'pathmnist'
+    info = INFO[data_flag]
+    DataClass = PathMNIST
+    # 归一化参数可根据medmnist官方推荐
+    transform = transforms.Compose([
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[.5, .5, .5], std=[.5, .5, .5])
+    ])
+    trainset = DataClass(split='train', root='./data', transform=transform, download=True)
+    testset = DataClass(split='test', root='./data', transform=transform, download=True)
+    return trainset, testset
 
 def distribute_dataset(dataset_name, num_peers, num_classes, dd_type = 'IID', classes_per_peer = 1, samples_per_class = 582, 
 alpha = 1):
@@ -20,6 +37,8 @@ alpha = 1):
         trainset, testset = get_cifar10()
     elif dataset_name == 'IMDB':
         trainset, testset, tokenizer = get_imdb(num_peers = num_peers)
+    elif dataset_name == 'PATHMNIST':
+        trainset, testset = get_pathmnist()
     if dd_type == 'IID':
         peers_data_dict = sample_dirichlet(trainset, num_peers, alpha=1000000)
     elif dd_type == 'NON_IID':
@@ -93,8 +112,16 @@ def sample_dirichlet(dataset, num_users, alpha=1):
     classes = {}
     for idx, x in enumerate(dataset):
         _, label = x
-        if type(label) == torch.Tensor:
+        if isinstance(label, torch.Tensor):
             label = label.item()
+        elif isinstance(label, np.ndarray):
+            # 如果是one-hot向量，取argmax
+            if label.ndim > 0 and label.size > 1:
+                label = int(np.argmax(label))
+            else:
+                label = int(label)  # 单元素数组
+        else:
+            label = int(label)  # 兜底
         if label in classes:
             classes[label].append(idx)
         else:

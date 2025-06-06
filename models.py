@@ -56,6 +56,23 @@ class BiLSTM(nn.Module):
         out = self.out(out)
         # return output
         return out
+class CNNPATHMNIST(nn.Module):
+    def __init__(self):
+        super(CNNPATHMNIST, self).__init__()
+        self.conv1 = nn.Conv2d(3, 32, kernel_size=3, padding=1)
+        self.conv2 = nn.Conv2d(32, 64, kernel_size=3, padding=1)
+        self.conv2_drop = nn.Dropout2d()
+        self.fc1 = nn.Linear(64 * 7 * 7, 128)
+        self.fc2 = nn.Linear(128, 9)
+
+    def forward(self, x):
+        x = F.relu(F.max_pool2d(self.conv1(x), 2))
+        x = F.relu(F.max_pool2d(self.conv2_drop(self.conv2(x)), 2))
+        x = x.view(-1, 64 * 7 * 7)
+        x = F.relu(self.fc1(x))
+        x = F.dropout(x, training=self.training)
+        x = self.fc2(x)
+        return F.log_softmax(x, dim=1)
 
 def setup_model(model_architecture, num_classes = None, tokenizer = None, embedding_dim = None):
 
@@ -65,7 +82,8 @@ def setup_model(model_architecture, num_classes = None, tokenizer = None, embedd
             "ResNet18" : tv.models.resnet18,
             "VGG16" : tv.models.vgg16,
             "DN121": tv.models.densenet121,
-            "SHUFFLENET":tv.models.shufflenet_v2_x1_0
+            "SHUFFLENET":tv.models.shufflenet_v2_x1_0,
+            "CNNPATHMNIST": CNNPATHMNIST
         }
         print('--> Creating {} model.....'.format(model_architecture))
         # variables in pre-trained ImageNet models are model-specific.
