@@ -23,6 +23,26 @@ from aggregation import *
 from IPython.display import clear_output
 import gc
 import logging
+from sklearn.neighbors import kneighbors_graph
+from sklearn.cluster import KMeans
+from sklearn.metrics.pairwise import cosine_similarity
+import pickle
+from datetime import datetime
+
+# DBONet 数据归一化函数 (来自原文)
+def normalization(data):
+    """数据归一化函数"""
+    maxVal = torch.max(data)
+    minVal = torch.min(data)
+    data = (data - minVal) / (maxVal - minVal + 1e-10)  # 避免除零
+    return data
+
+def standardization(data):
+    """数据标准化函数"""
+    rowSum = torch.sqrt(torch.sum(data**2, 1))
+    repMat = rowSum.repeat((data.shape[1], 1)) + 1e-10
+    data = torch.div(data, repMat.t())
+    return data
 
 class Peer():
     # Class variable shared among all the instances
@@ -52,11 +72,11 @@ class Peer():
         self.peer_type = peer_type
 #======================================= Start of training function ===========================================================#
     def participant_update(self, global_epoch, model, attack_type = 'no_attack', malicious_behavior_rate = 0, 
-                            source_class = None, target_class = None, dataset_name = None) :
-        
+                            source_class = None, target_class = None, dataset_name = None, rule = 'fedavg') :
         epochs = self.local_epochs
         train_loader = DataLoader(self.local_data, self.local_bs, shuffle = True, drop_last=True)
         attacked = 0
+        local_features = []  # 新增：收集多视图特征
         #Get the poisoned training data of the peer in case of label-flipping or backdoor attacks
         if (attack_type == 'label_flipping') and (self.peer_type == 'attacker'):
             r = np.random.random()
@@ -80,6 +100,7 @@ class Peer():
         peer_grad = []
         t = 0
         for epoch in range(epochs):
+            correct, total = 0, 0
             for batch_idx, (data, target) in enumerate(train_loader):
                 if dataset_name == 'IMDB':
                     target = target.view(-1,1) * (1 - attacked)
@@ -88,10 +109,21 @@ class Peer():
                 if target.ndim > 1:
                     target = target.argmax(dim=-1)
 
-                output = model(data)
+                # 只有在rule包含'mv'时才提取多视图特征
+                if 'mv' in rule and hasattr(model, 'forward') and 'return_features' in model.forward.__code__.co_varnames:
+                    features, output = model(data, return_features=True)
+                    # 只保存最后一个batch的特征作为代表（避免过多的特征累积）
+                    if batch_idx == len(train_loader) - 1:  # 最后一个batch
+                        local_features.append(features)
+                else:
+                    output = model(data)
                 loss = self.criterion(output, target)
                 loss.backward()    
                 epoch_loss.append(loss.item())
+                # 统计本地acc
+                pred = output.argmax(dim=1)
+                correct += (pred == target).sum().item()
+                total += target.size(0)
                 # get gradients
                 cur_time = time.time()
                 for i, (name, params) in enumerate(model.named_parameters()):
@@ -104,8 +136,10 @@ class Peer():
                 optimizer.step()
                 model.zero_grad()
                 optimizer.zero_grad()
-               
-            # print('Train epoch: {} \tLoss: {:.6f}'.format((epochs+1), np.mean(epoch_loss)))
+            # 每个epoch结束后打印本地loss/acc
+            avg_loss = np.mean(epoch_loss[-len(train_loader):])
+            acc = correct / total if total > 0 else 0
+            # print(f'[Peer {self.peer_id}] Local Epoch {epoch+1}: Loss={avg_loss:.4f}, Acc={acc*100:.2f}%')
     
         if (attack_type == 'gaussian' and self.peer_type == 'attacker'):
             update, flag =  gaussian_attack(model.state_dict(), self.peer_pseudonym,
@@ -115,11 +149,8 @@ class Peer():
                 attacked = 1
             model.load_state_dict(update)
 
-        # print('xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx')
-        # print("Number of Attacks:{}".format(self.performed_attacks))
-        # print('xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx')
         model = model.cpu()
-        return model.state_dict(), peer_grad , model, np.mean(epoch_loss), attacked, t
+        return model.state_dict(), peer_grad , model, np.mean(epoch_loss), attacked, t, local_features
 #======================================= End of training function =============================================================#
 #========================================= End of Peer class ====================================================================
 
@@ -169,6 +200,10 @@ class FL:
         self.trainset, self.testset, user_groups_train, tokenizer = distribute_dataset(self.dataset_name, self.num_peers, self.num_classes, 
         self.dd_type, self.class_per_peer, self.samples_per_class, self.alpha)
 
+        # 自动检查模型和数据尺寸是否匹配
+        tmp_loader = DataLoader(self.trainset, batch_size=4, shuffle=True)
+        inputs, _ = next(iter(tmp_loader))
+
         self.test_loader = DataLoader(self.testset, batch_size = self.test_batch_size,
             shuffle = False, num_workers = 1)
     
@@ -182,6 +217,7 @@ class FL:
         self.have_source_class = []
         self.labels = []
         print('--> Distributing training data among peers')
+        
         for p in user_groups_train:
             self.labels.append(user_groups_train[p]['labels'])
             indices = user_groups_train[p]['data']
@@ -218,8 +254,31 @@ class FL:
 
         del self.local_data
 
+    #======================================= Multi-view and DBO Aggregation Functions =========================================#
+
+
+
+    
+    def _parameter_similarity_aggregation(self, simulation_model, local_weights):
+        """基于参数相似性的聚合方法 - 无回退机制"""
+        param_similarities = []
+        global_params = list(simulation_model.parameters())[0].detach().cpu().numpy().flatten()
+        
+        for i, local_weight in enumerate(local_weights):
+            local_param = list(local_weight.values())[0].cpu().numpy().flatten()
+            similarity = np.dot(global_params, local_param) / (np.linalg.norm(global_params) * np.linalg.norm(local_param) + 1e-8)
+            param_similarities.append(abs(similarity))
+        
+        weights = np.array(param_similarities)
+        weights = weights / (np.sum(weights) + 1e-8)
+        
+        print(f"[Parameter Similarity] Using weights: {weights}")
+        return average_weights(local_weights, weights)
+
+
+
 #======================================= Start of testning function ===========================================================#
-    def test(self, model, device, test_loader, dataset_name = None):
+    def test(self, model, device, test_loader, dataset_name=None):
         model.eval()
         test_loss = []
         correct = 0
@@ -227,22 +286,29 @@ class FL:
         for batch_idx, (data, target) in enumerate(test_loader):
             data, target = data.to(self.device), target.to(self.device)
             output = model(data)
-            if dataset_name == 'IMDB':
-                test_loss.append(self.criterion(output, target.view(-1,1)).item()) # sum up batch loss
-                pred = output > 0.5 # get the index of the max log-probability
-                correct+= pred.eq(target.view_as(pred)).sum().item()
-            else:
-                if target.ndim > 1:
-                    target = target.argmax(dim=-1)
-                test_loss.append(self.criterion(output, target).item()) # sum up batch loss
-                pred = output.argmax(dim=1, keepdim=True) # get the index of the max log-probability
-                correct+= pred.eq(target.view_as(pred)).sum().item()
 
-            n+= target.shape[0]
-        test_loss = np.mean(test_loss)
-        print('\nAverage test loss: {:.4f}, Test accuracy: {}/{} ({:.2f}%)\n'.format(test_loss, correct, n,
-           100*correct / n))
-        return  100.0*(float(correct) / n), test_loss
+            if dataset_name == 'IMDB':
+                # IMDB二分类/回归
+                target_loss = target.float().view(-1, 1)
+                loss = self.criterion(output, target_loss)
+                pred = (output > 0.5).long().view(-1)
+                target_acc = target.view(-1).long()
+            else:
+                # 多分类，统一target为类别索引
+                if target.ndim > 1:
+                    target = target.squeeze()  # 修复：使用squeeze而不是argmax
+                loss = self.criterion(output, target)
+                pred = output.argmax(dim=1)
+                target_acc = target
+
+            test_loss.append(loss.item())
+            correct += (pred == target_acc).sum().item()
+            n += target_acc.size(0)
+
+        test_loss = np.mean(test_loss) if test_loss else float('inf')
+        print('\nAverage test loss: {:.4f}, Test accuracy: {}/{} ({:.2f}%)\n'.format(
+            test_loss, correct, n, 100 * correct / n))
+        return 100.0 * (correct / n), test_loss
     #======================================= End of testning function =============================================================#
 #Test label prediction function    
     def test_label_predictions(self, model, device, test_loader, dataset_name = None):
@@ -255,12 +321,19 @@ class FL:
                 output = model(data)
                 if dataset_name == 'IMDB':
                     prediction = output > 0.5
+                    target_processed = target.float().view(-1)
                 else:
-                    prediction = output.argmax(dim=1, keepdim=True)
+                    prediction = output.argmax(dim=1)
+                    # 确保target是正确的类别索引格式
+                    if target.ndim > 1:
+                        target_processed = target.squeeze()  # 压缩维度而不是argmax
+                    else:
+                        target_processed = target
                 
-                actuals.extend(target.view_as(prediction))
-                predictions.extend(prediction)
-        return [i.item() for i in actuals], [i.item() for i in predictions]
+                # 确保转换为列表时保持正确的数据格式
+                actuals.extend(target_processed.cpu().numpy().tolist())
+                predictions.extend(prediction.cpu().numpy().tolist())
+        return actuals, predictions
     
     #choose random set of peers
     def choose_peers(self):
@@ -276,6 +349,9 @@ class FL:
         
     def run_experiment(self, attack_type = 'no_attack', malicious_behavior_rate = 0,
         source_class = None, target_class = None, rule = 'fedavg', resume = False, log_file="experiment.log"):
+        # 生成时间戳
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        
         logging.basicConfig(filename=log_file,
                             filemode='a',
                             format='%(asctime)s %(message)s',
@@ -285,6 +361,9 @@ class FL:
         lfd = LFD(self.num_classes)
         fg = FoolsGold(self.num_peers)
         tolpegin = Tolpegin()
+        lfighter_dbo = LFighterDBO()
+        lfighter_mv = LFighterMV()
+        lfighter_mv_dbo = LFighterMVDBO()
         # copy weights
         global_weights = simulation_model.state_dict()
         last10_updates = []
@@ -293,6 +372,7 @@ class FL:
         source_class_accuracies = []
         cpu_runtimes = []
         noise_scalar = 1.0
+        asr = 0.0  # 初始化ASR变量
         # best_accuracy = 0.0
         mapping = {'honest': 'Good update', 'attacker': 'Bad update'}
 
@@ -314,27 +394,30 @@ class FL:
             gc.collect()
             torch.cuda.empty_cache()
             
+            # 初始化视图权重字符串
+            view_weights_str = None
+            
             # if epoch % 20 == 0:
             #     clear_output()  
             print(f'\n | Global training round : {epoch+1}/{self.global_rounds} |\n')
             selected_peers = self.choose_peers()
             local_weights, local_grads, local_models, local_losses, performed_attacks = [], [], [], [], []  
+            all_local_features = []  # 新增：收集所有peer的特征
             peers_types = []
             i = 1        
             attacks = 0
             Peer._performed_attacks = 0
             for peer in selected_peers:
                 peers_types.append(mapping[self.peers[peer].peer_type])
-                # print(i)
-                # print('\n{}: {} Starts training in global round:{} |'.format(i, (self.peers_pseudonyms[peer]), (epoch + 1)))
-                peer_update, peer_grad, peer_local_model, peer_loss, attacked, t = self.peers[peer].participant_update(epoch, 
+                peer_update, peer_grad, peer_local_model, peer_loss, attacked, t, peer_features = self.peers[peer].participant_update(epoch, 
                 copy.deepcopy(simulation_model),
                 attack_type = attack_type, malicious_behavior_rate = malicious_behavior_rate, 
-                source_class = source_class, target_class = target_class, dataset_name = self.dataset_name)
+                source_class = source_class, target_class = target_class, dataset_name = self.dataset_name, rule = rule)
                 local_weights.append(peer_update)
                 local_grads.append(peer_grad)
                 local_losses.append(peer_loss) 
-                local_models.append(peer_local_model) 
+                local_models.append(peer_local_model)
+                all_local_features.append(peer_features)  # 收集每个peer的特征
                 attacks+= attacked
                 # print('{} ends training in global round:{} |\n'.format((self.peers_pseudonyms[peer]), (epoch + 1))) 
                 i+= 1
@@ -397,7 +480,29 @@ class FL:
                 global_weights = lfd.aggregate(copy.deepcopy(simulation_model), copy.deepcopy(local_models), peers_types)
                 cpu_runtimes.append(time.time() - cur_time)
 
-            
+
+            elif rule == 'lfighter_mv':
+                cur_time = time.time()
+                result = lfighter_mv.aggregate(simulation_model, local_weights, all_local_features, local_models, peers_types, lfd)
+                if isinstance(result, tuple):
+                    global_weights, view_weights_info = result
+                    # 格式化视图权重信息用于日志
+                    view_weights_str = f"Output:{view_weights_info['output_grad']:.3f},Activation:{view_weights_info['first_activation']:.3f},Input:{view_weights_info['input_grad']:.3f}"
+                else:
+                    global_weights = result
+                    view_weights_str = "N/A"
+                cpu_runtimes.append(time.time() - cur_time)
+
+            elif rule == 'lfighter_dbo':
+                cur_time = time.time()
+                global_weights = lfighter_dbo.aggregate(simulation_model, local_weights, all_local_features)
+                cpu_runtimes.append(time.time() - cur_time)
+
+            elif rule == 'lfighter_mv_dbo':
+                cur_time = time.time()
+                global_weights = lfighter_mv_dbo.aggregate(simulation_model, local_weights, all_local_features)
+                cpu_runtimes.append(time.time() - cur_time)
+
             elif rule == 'fedavg':
                 cur_time = time.time()
                 global_weights = average_weights(local_weights, [1 for i in range(len(local_weights))])
@@ -414,18 +519,60 @@ class FL:
             # update global weights
             g_model = copy.deepcopy(simulation_model)
             simulation_model.load_state_dict(global_weights)           
+            # 聚合后打印全局模型参数均值/方差
+            params = list(simulation_model.parameters())
+            print(f'[After aggregation] Epoch {epoch+1} global param mean: {params[0].data.mean().item():.6f}, std: {params[0].data.std().item():.6f}')
             if epoch >= self.global_rounds-10:
                 last10_updates.append(global_weights) 
 
             current_accuracy, test_loss = self.test(simulation_model, self.device, self.test_loader, dataset_name=self.dataset_name)
             
-            if np.isnan(test_loss):
-                simulation_model = copy.deepcopy(g_model)
-                noise_scalar = noise_scalar*0.5
+            # 移除NaN检查回退机制 - 让真实错误显示
+            
+            # 计算当前轮次的ASR (在日志记录之前)
+            actuals, predictions = self.test_label_predictions(simulation_model, self.device, self.test_loader, dataset_name=self.dataset_name)
+            classes = list(self.labels_dict.keys())
+            from sklearn.metrics import confusion_matrix
+            cm = confusion_matrix(actuals, predictions, labels=classes)
+            
+            current_asr = 0.0  # 当前轮次的ASR
+            current_source_acc = 0.0  # 当前轮次的源类别准确率
+            for i, r in enumerate(cm):
+                if i == source_class:
+                    current_source_acc = np.round(r[i]/np.sum(r)*100, 2) if np.sum(r) > 0 else 0.0
+                    source_class_accuracies.append(current_source_acc)
+                    # 计算ASR
+                    if np.sum(r) > 0:
+                        current_asr = np.round(r[target_class]/np.sum(r)*100, 2)
+                    break
             
             global_accuracies.append(np.round(current_accuracy, 2))
             test_losses.append(np.round(test_loss, 4))
             performed_attacks.append(attacks) 
+            
+            # 每轮训练结束后写日志 (现在包含ASR)
+            if rule == 'lfighter_mv' and view_weights_str is not None:
+                log_msg = (
+                    f"Round {epoch+1}/{self.global_rounds} | "
+                    f"Global Acc: {current_accuracy:.2f} | "
+                    f"Test Loss: {test_loss:.4f} | "
+                    f"Attacks: {attacks} | "
+                    f"Source Class Acc: {current_source_acc:.2f} | "
+                    f"ASR: {current_asr:.2f}% | "
+                    f"ViewWeights: {view_weights_str}"
+                )
+            else:
+                log_msg = (
+                    f"Round {epoch+1}/{self.global_rounds} | "
+                    f"Global Acc: {current_accuracy:.2f} | "
+                    f"Test Loss: {test_loss:.4f} | "
+                    f"Attacks: {attacks} | "
+                    f"Source Class Acc: {current_source_acc:.2f} | "
+                    f"ASR: {current_asr:.2f}%"
+                )
+            print(log_msg)
+            logging.info(log_msg)
+            
             state = {
                 'epoch': epoch,
                 'state_dict': simulation_model.state_dict(),
@@ -436,22 +583,48 @@ class FL:
                 'global_accuracies': global_accuracies,
                 'source_class_accuracies': source_class_accuracies
                 }
-            savepath = './checkpoints/'+ self.dataset_name + '_' + self.model_name + '_' + self.dd_type + '_'+ rule + '_'+ str(self.attackers_ratio) + '_' + str(self.local_epochs) + '.t7'
+            savepath = './checkpoints/'+ self.dataset_name + '_' + self.model_name + '_' + self.dd_type + '_'+ rule + '_'+ str(self.attackers_ratio) + '_' + str(self.local_epochs) + '_' + timestamp + '.t7'
             torch.save(state,savepath)
+
             del local_models
             del local_weights
             del local_grads
             gc.collect()
             torch.cuda.empty_cache()
             # print("***********************************************************************************")
-            #print and show confusion matrix after each global round
-            actuals, predictions = self.test_label_predictions(simulation_model, self.device, self.test_loader, dataset_name=self.dataset_name)
-            classes = list(self.labels_dict.keys())
-            print('{0:10s} - {1}'.format('Class','Accuracy'))
-            for i, r in enumerate(confusion_matrix(actuals, predictions)):
-                print('{0:10s} - {1:.1f}'.format(classes[i], r[i]/np.sum(r)*100))
+            
+            # 详细混淆矩阵分析 (可选显示)
+            # print("\n=== 完整混淆矩阵分析 ===")
+            # print("混淆矩阵 (行=真实标签, 列=预测标签):")
+            # print(cm)
+            # print("\n各类别样本数量分布:")
+            total_samples = 0
+            for i, class_name in enumerate(classes):
+                class_total = cm[i].sum()
+                total_samples += class_total
+            #     print(f"{self.labels_dict[class_name]:25}: {class_total:4d} 样本")
+            # print(f"{'总样本数':25}: {total_samples:4d}")
+            
+            print('\n{0:10s} - {1:>8s} - {2:>8s} - {3:>8s}'.format('Class','Accuracy','Correct','Total'))
+            print('-' * 60)
+            correct_predictions = 0
+            for i, r in enumerate(cm):
+                class_accuracy = r[i]/np.sum(r)*100 if np.sum(r) > 0 else 0
+                correct_predictions += r[i]
+                print('{:25} - {:6.1f}% - {:6d} - {:6d}'.format(
+                    self.labels_dict[classes[i]], 
+                    class_accuracy,
+                    r[i], 
+                    np.sum(r)
+                ))
                 if i == source_class:
-                    source_class_accuracies.append(np.round(r[i]/np.sum(r)*100, 2))
+                    print(f"[轮次{epoch+1} ASR] 源类别{source_class}->目标类别{target_class}: {current_asr:.2f}%")
+            
+            # 验证全局准确率计算
+            manual_global_acc = correct_predictions / total_samples * 100
+            # print(f"\n手动计算的全局准确率: {manual_global_acc:.2f}%")
+            print(f"test函数计算的全局准确率: {current_accuracy:.2f}%")
+            # print("=== 混淆矩阵分析结束 ===\n")
 
             if epoch == self.global_rounds-1:
                 print('Last 10 updates results')
@@ -466,24 +639,48 @@ class FL:
                 #print and show confusion matrix after each global round
                 actuals, predictions = self.test_label_predictions(simulation_model, self.device, self.test_loader, dataset_name=self.dataset_name)
                 classes = list(self.labels_dict.keys())
-                print('{0:10s} - {1}'.format('Class','Accuracy'))
-                asr = 0.0
-                for i, r in enumerate(confusion_matrix(actuals, predictions)):
-                    print('{0:10s} - {1:.1f}'.format(classes[i], r[i]/np.sum(r)*100))
+                from sklearn.metrics import confusion_matrix
+                cm = confusion_matrix(actuals, predictions, labels=classes)
+                
+                # 最终轮次的完整混淆矩阵输出
+                # print("\n=== 最终轮次完整混淆矩阵分析 ===")
+                # print("混淆矩阵 (行=真实标签, 列=预测标签):")
+                # print(cm)
+                # print("\n各类别样本数量分布:")
+                total_samples = 0
+                for i, class_name in enumerate(classes):
+                    class_total = cm[i].sum()
+                    total_samples += class_total
+                    # print(f"{self.labels_dict[class_name]:25}: {class_total:4d} 样本")
+                # print(f"{'总样本数':25}: {total_samples:4d}")
+                
+                print('\n{0:10s} - {1:>8s} - {2:>8s} - {3:>8s}'.format('Class','Accuracy','Correct','Total'))
+                print('-' * 60)
+                correct_predictions = 0
+                asr = 0.0  # 初始化ASR
+                for i, r in enumerate(cm):
+                    class_accuracy = r[i]/np.sum(r)*100 if np.sum(r) > 0 else 0
+                    correct_predictions += r[i]
+                    print('{:25} - {:6.1f}% - {:6d} - {:6d}'.format(
+                        self.labels_dict[classes[i]], 
+                        class_accuracy,
+                        r[i], 
+                        np.sum(r)
+                    ))
                     if i == source_class:
-                        source_class_accuracies.append(np.round(r[i]/np.sum(r)*100, 2))
-                        asr = np.round(r[target_class]/np.sum(r)*100, 2)
-
-            # 每轮训练结束后写日志
-            log_msg = (
-                f"Round {epoch+1}/{self.global_rounds} | "
-                f"Global Acc: {current_accuracy:.2f} | "
-                f"Test Loss: {test_loss:.4f} | "
-                f"Attacks: {attacks} | "
-                f"Source Class Acc: {source_class_accuracies[-1] if source_class_accuracies else 'N/A'}"
-            )
-            print(log_msg)
-            logging.info(log_msg)
+                        source_class_accuracies.append(np.round(class_accuracy, 2))
+                        # 修正ASR计算：源类别样本中被预测为目标类别的比例
+                        if np.sum(r) > 0:
+                            asr = np.round(r[target_class]/np.sum(r)*100, 2)
+                        else:
+                            asr = 0.0
+                        print(f"[ASR计算] 源类别{source_class}总样本: {np.sum(r)}, 被预测为目标类别{target_class}: {r[target_class]}, ASR: {asr:.2f}%")
+                
+                # 验证全局准确率计算
+                manual_global_acc = correct_predictions / total_samples * 100
+                # print(f"\n手动计算的全局准确率: {manual_global_acc:.2f}%")
+                print(f"test函数计算的全局准确率: {current_accuracy:.2f}%")
+                # print("=== 最终混淆矩阵分析结束 ===\n")
 
         # 实验结束后写最终结果
         final_msg = (
@@ -501,7 +698,7 @@ class FL:
                 'asr':asr,
                 'avg_cpu_runtime':np.mean(cpu_runtimes)
                 }
-        savepath = './results/'+ self.dataset_name + '_' + self.model_name + '_' + self.dd_type + '_'+ rule + '_'+ str(self.attackers_ratio) + '_' + str(self.local_epochs) + '.t7'
+        savepath = './results/'+ self.dataset_name + '_' + self.model_name + '_' + self.dd_type + '_'+ rule + '_'+ str(self.attackers_ratio) + '_' + str(self.local_epochs) + '_' + timestamp + '.t7'
         torch.save(state,savepath)            
         print('Global accuracies: ', global_accuracies)
         print('Class {} accuracies: '.format(source_class), source_class_accuracies)

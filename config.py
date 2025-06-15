@@ -4,42 +4,47 @@ import torch.nn as nn
 
 #=============================== Defining global variables ========================#
 DATASET_NAME = "PATHMNIST"
-MODEL_NAME = "CNNPATHMNIST"  # 你需要在models.py中实现CNNPATHMNIST模型
+MODEL_NAME = "CNNPATHMNIST"  # 你需要在models.py中实现CNNMNIST模型
 DD_TYPE = 'NON_IID'
+LOG_DIST_TYPE = DD_TYPE  # 新增：用于日志命名的分布类型（IID或NONIID）
 ALPHA = 1
-NUM_PEERS = 100 # "number of peers: K" 
-FRAC_PEERS = 1 #'the fraction of peers: C to be selected in each round'
+NUM_PEERS = 100     # 小规模测试：只用5个peer
+FRAC_PEERS = 1.0  # 每轮采样全部peer
 SEED = 7 #fixed seed
 random.seed(SEED)
-CRITERION = nn.CrossEntropyLoss()
-GLOBAL_ROUNDS = 200 #"number of rounds of federated model training"
-LOCAL_EPOCHS = 3 #"the number of local epochs: E for each peer"
-TEST_BATCH_SIZE = 1000
-LOCAL_BS = 64 #"local batch size: B for each peer"
-LOCAL_LR =  0.01#local learning rate: lr for each peer
-LOCAL_MOMENTUM = 0.9 #local momentum for each peer
-NUM_CLASSES = 9 # PATHMNIST有9类
-LABELS_DICT = {
-    'background': 0,
-    'normal': 1,
-    'cancer': 2,
-    'adenoma': 3,
-    'inflammation': 4,
-    'hyperplasia': 5,
-    'be': 6,
-    'dysplasia': 7,
-    'other': 8
-}
 
 #select the device to work with cpu or gpu
 if torch.cuda.is_available():
-    DEVICE = "cuda"
+    DEVICE = "cuda:6"  # 指定使用GPU6
 else:
     DEVICE = "cpu"
 DEVICE = torch.device(DEVICE)
-SOURCE_CLASS = 2 # 以cancer为例，源类别（可根据实验需求调整）
-TARGET_CLASS = 1 # 以normal为例，目标类别（可根据实验需求调整）
+
+# 小规模快速测试配置
+CRITERION = nn.CrossEntropyLoss()  # 继续使用标准CE
+
+GLOBAL_ROUNDS = 200  # 小规模测试：只训练10轮
+LOCAL_EPOCHS = 3    # 减少本地轮次到2轮
+TEST_BATCH_SIZE = 1000 # 减少测试批次大小
+LOCAL_BS = 64      # 减少批次大小
+LOCAL_LR =  0.01   # 保持学习率
+LOCAL_MOMENTUM = 0.9 #local momentum for each peer
+NUM_CLASSES = 9 # PATHMNIST有9类
+LABELS_DICT = {
+    0: 'Adipose',
+    1: 'Background',
+    2: 'Debris',
+    3: 'Lymphocytes',
+    4: 'Mucus',
+    5: 'Smooth muscle',
+    6: 'Normal colon mucosa',
+    7: 'Cancer-associated stroma',
+    8: 'Colorectal adenocarcinoma epithelium'
+}
+
+SOURCE_CLASS = 3 
+TARGET_CLASS = 5 
 
 CLASS_PER_PEER = 9  # 每个peer拥有的类别数，建议与NUM_CLASSES一致
-SAMPLES_PER_CLASS = 700  # 每类样本数，可根据PATHMNIST实际情况调整
+SAMPLES_PER_CLASS = 582  # 小规模测试：每类只用100个样本
 RATE_UNBALANCE = 1

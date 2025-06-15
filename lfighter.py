@@ -1,13 +1,15 @@
 import config
 from experiment_federated import run_exp 
 import os
+from datetime import datetime
 # LFighter防御实验
 RULE = 'lfighter'
 ATTACK_TYPE = 'label_flipping'
 MALICIOUS_BEHAVIOR_RATE = 1
 os.makedirs('log', exist_ok=True)
-for atr in [0.4]:
-    LOG_FILE = f"log/lfighter_source{config.SOURCE_CLASS}_target{config.TARGET_CLASS}_atr{atr}.log"
+for atr in [0.5]:
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    LOG_FILE = f"log/lfighter_{config.LOG_DIST_TYPE}_source{config.SOURCE_CLASS}_target{config.TARGET_CLASS}_atr{atr}_{timestamp}.log"
     run_exp(dataset_name = config.DATASET_NAME, model_name = config.MODEL_NAME, dd_type = config.DD_TYPE, num_peers = config.NUM_PEERS, 
             frac_peers = config.FRAC_PEERS, seed = config.SEED, test_batch_size = config.TEST_BATCH_SIZE,
                 criterion = config.CRITERION, global_rounds = config.GLOBAL_ROUNDS, local_epochs = config.LOCAL_EPOCHS, local_bs = config.LOCAL_BS, 

@@ -81,3 +81,31 @@ class IMDBDataset:
 def combine_datasets(list_of_datasets):
     return data.ConcatDataset(list_of_datasets)
     
+# 在分割数据集后，打印全局训练集标签分布
+if __name__ == "__main__":
+    import torchvision
+    import torchvision.transforms as transforms
+    import os
+    import numpy as np
+    # 自动加载PATHMNIST训练集
+    try:
+        from torchvision.datasets import VisionDataset
+        from torchvision.datasets.utils import download_url
+        # 你主流程应该用的是torchvision.datasets.ImageFolder或类似方式
+        # 这里假设数据已解压在 data/PATHMNIST/，每类一个子文件夹
+        data_dir = os.path.join('data', 'PATHMNIST')
+        if not os.path.exists(data_dir):
+            print('请确保PATHMNIST数据已解压到 data/PATHMNIST/')
+        else:
+            trainset = torchvision.datasets.ImageFolder(root=data_dir, transform=transforms.ToTensor())
+            labels = [label for _, label in trainset.samples]
+            print('训练集标签分布:', np.bincount(np.array(labels)))
+    except Exception as e:
+        print('无法打印标签分布:', e)
+    
+    data = np.load('data/pathmnist.npz')
+    y_train = data['train_labels']
+    # y_train shape: (N, 1) 或 (N,)
+    y_train = y_train.flatten()
+    print('训练集标签分布:', np.bincount(y_train))
+    

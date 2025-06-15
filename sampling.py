@@ -1,3 +1,7 @@
+import os
+os.environ['HTTP_PROXY'] = 'http://squid.auckland.ac.nz:3128'
+os.environ['HTTPS_PROXY'] = 'http://squid.auckland.ac.nz:3128'
+
 '''Some helper functions
 '''
 import random
@@ -11,17 +15,22 @@ import pandas as pd
 from datasets import *
 from medmnist import PathMNIST
 from medmnist import INFO
+import importlib
 
 #添加PATHMNIST加载函数
+config = importlib.import_module('config')
+
 def get_pathmnist():
     import torchvision.transforms as transforms
     data_flag = 'pathmnist'
     info = INFO[data_flag]
     DataClass = PathMNIST
-    # 归一化参数可根据medmnist官方推荐
+    # 还原为三通道RGB
+    resize_shape = (28, 28)
     transform = transforms.Compose([
+        transforms.Resize(resize_shape),
         transforms.ToTensor(),
-        transforms.Normalize(mean=[.5, .5, .5], std=[.5, .5, .5])
+        transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
     ])
     trainset = DataClass(split='train', root='./data', transform=transform, download=True)
     testset = DataClass(split='test', root='./data', transform=transform, download=True)
