@@ -98,12 +98,46 @@ class LFD():
         for i in range(m):
             data.append(dw[i][max_two_freq_classes].reshape(-1))
 
-        kmeans = KMeans(n_clusters=2, random_state=0).fit(data)
+        # === 统一降维处理：确保消融实验公平性 ===
+        def unified_dimension_reduction(features, target_dim=200, method='auto', standardize=True):
+            """统一降维函数：与多视图算法保持一致"""
+            features_array = np.array(features)
+            n_samples, original_dim = features_array.shape
+            
+            # 1. 标准化处理
+            if standardize:
+                from sklearn.preprocessing import StandardScaler
+                scaler = StandardScaler()
+                features_array = scaler.fit_transform(features_array)
+                std_info = "standardized"
+            else:
+                std_info = "raw"
+            
+            # 2. 智能降维策略
+            max_pca_components = min(n_samples, original_dim)
+            effective_target_dim = min(target_dim, max_pca_components)
+            
+            if original_dim <= effective_target_dim:
+                return features_array, f"keep_all_{original_dim}_{std_info}"
+            elif original_dim <= effective_target_dim * 2:
+                return features_array[:, :effective_target_dim], f"truncate_{effective_target_dim}_{std_info}"
+            else:
+                from sklearn.decomposition import PCA
+                pca = PCA(n_components=effective_target_dim, random_state=42)
+                reduced_features = pca.fit_transform(features_array)
+                explained_ratio = np.sum(pca.explained_variance_ratio_)
+                return reduced_features, f"pca_{effective_target_dim}_var{explained_ratio:.3f}_{std_info}"
+        
+        # 应用统一降维（与多视图算法保持一致）
+        data_reduced, reduction_method = unified_dimension_reduction(data, target_dim=200)
+        print(f'[LFighter] Applied unified dimension reduction: {reduction_method}')
+        
+        kmeans = KMeans(n_clusters=2, random_state=0).fit(data_reduced)
         labels = kmeans.labels_
 
         clusters = {0:[], 1:[]}
         for i, l in enumerate(labels):
-          clusters[l].append(data[i])
+          clusters[l].append(data_reduced[i])
 
         good_cl = 0
         cs0, cs1 = self.clusters_dissimilarity(clusters)
@@ -215,82 +249,185 @@ class LFighterDBO:
         
         global_model = list(simulation_model.parameters())
         
-        # 只使用输出层权重差异（梯度方向）
+        # 使用与LFighter一致的关键类别检测和提取
+        # 首先检测最异常的两个类别（与LFighter逻辑完全一致）
+        memory = np.zeros(global_model[-1].shape[0])  # 输出层偏置的维度
+        
+        for i in range(m):
+            # 计算权重和偏置的差异
+            dw = global_model[-2].cpu().data.numpy() - local_models[i][-2].cpu().data.numpy()
+            db = global_model[-1].cpu().data.numpy() - local_models[i][-1].cpu().data.numpy()
+            
+            # 累积异常程度（与原版LFighter的逻辑一致）
+            norms = np.linalg.norm(dw, axis=-1)
+            memory += norms + np.abs(db)
+        
+        # 找到最异常的两个类别
+        max_two_freq_classes = memory.argsort()[-2:]
+        print(f'[LFighter-DBO] Detected anomalous classes (same as LFighter): {max_two_freq_classes}')
+        
+        # 只提取这两个类别的输出层梯度（与LFighter完全一致）
         gradients = []
         for i in range(m):
-            # 只用最后一层（输出层）
-            grad = global_model[-2].cpu().data.numpy() - local_models[i][-2].cpu().data.numpy()
-            gradients.append(grad.reshape(-1))
+            dw = global_model[-2].cpu().data.numpy() - local_models[i][-2].cpu().data.numpy()
+            key_classes_grad = dw[max_two_freq_classes].reshape(-1)
+            gradients.append(key_classes_grad)
         
         feature_matrix = np.array(gradients)
         print(f"[LFighter-DBO] Gradient matrix shape: {feature_matrix.shape}")
         
+        # === 统一降维处理：确保消融实验公平性 ===
+        def unified_dimension_reduction(features, target_dim=200, method='auto', standardize=True):
+            """统一降维函数：与多视图算法保持一致"""
+            features_array = np.array(features)
+            n_samples, original_dim = features_array.shape
+            
+            # 1. 标准化处理
+            if standardize:
+                from sklearn.preprocessing import StandardScaler
+                scaler = StandardScaler()
+                features_array = scaler.fit_transform(features_array)
+                std_info = "standardized"
+            else:
+                std_info = "raw"
+            
+            # 2. 智能降维策略
+            max_pca_components = min(n_samples, original_dim)
+            effective_target_dim = min(target_dim, max_pca_components)
+            
+            if original_dim <= effective_target_dim:
+                return features_array, f"keep_all_{original_dim}_{std_info}"
+            elif original_dim <= effective_target_dim * 2:
+                return features_array[:, :effective_target_dim], f"truncate_{effective_target_dim}_{std_info}"
+            else:
+                from sklearn.decomposition import PCA
+                pca = PCA(n_components=effective_target_dim, random_state=42)
+                reduced_features = pca.fit_transform(features_array)
+                explained_ratio = np.sum(pca.explained_variance_ratio_)
+                return reduced_features, f"pca_{effective_target_dim}_var{explained_ratio:.3f}_{std_info}"
+        
+        # 应用统一降维（与多视图算法保持一致）
+        feature_matrix_reduced, reduction_method = unified_dimension_reduction(feature_matrix, target_dim=200)
+        print(f"[LFighter-DBO] Applied unified dimension reduction: {reduction_method}")
+        
         # 轻量级DBONet配置：blocks=1-2，快速训练
         n_view = 1
-        nfeats = [feature_matrix.shape[1]]
+        nfeats = [feature_matrix_reduced.shape[1]]  # 使用降维后的维度
         n_clusters = 2
-        blocks = 2  # 轻量级配置
-        para = 0.1
+        blocks = 2  # 统一配置
+        para = 0.05  # 统一参数（与MV-DBO保持一致）
         np.random.seed(42)
-        Z_init = np.random.randn(m, n_clusters) * 0.1
+        Z_init = np.random.randn(m, n_clusters) * 0.01  # 统一初始化缩放
         
-        # 简单邻接矩阵
-        n_neighbors = min(3, m//2)  # 更少的邻居
-        adj = kneighbors_graph(feature_matrix, n_neighbors=n_neighbors, mode='connectivity', include_self=True)
+        # 统一邻接矩阵配置
+        n_neighbors = min(5, m-1)  # 与MV-DBO保持一致的邻居数量
+        adj = kneighbors_graph(feature_matrix_reduced, n_neighbors=n_neighbors, mode='connectivity', include_self=True)
         adj_tensor = torch.tensor(adj.toarray(), dtype=torch.float32, device=device)
         
         # 创建轻量级DBONet
         dbo_model = DBONet(nfeats, n_view, n_clusters, blocks, para, Z_init, device)
-        features_tensor = [torch.tensor(feature_matrix, dtype=torch.float32, device=device)]
+        features_tensor = [torch.tensor(feature_matrix_reduced, dtype=torch.float32, device=device)]
         adjs = [adj_tensor]
         
-        # 简单归一化
-        features_norm = [standardization(normalization(features_tensor[0]))]
+        # 统一归一化流程（与MV-DBO一致）
+        features_norm = []
+        for i in range(n_view):
+            # 多步归一化
+            feature = features_tensor[i]
+            feature = (feature - feature.mean(dim=0)) / (feature.std(dim=0) + 1e-8)  # 标准化
+            feature = standardization(normalization(feature))  # 进一步归一化
+            features_norm.append(feature)
         
-        # 快速训练：epoch=3-5，只用显式loss
+        # 统一训练配置：与MV-DBO完全相同
         dbo_model.train()
-        optimizer = torch.optim.Adam(dbo_model.parameters(), lr=1e-3)
+        optimizer = torch.optim.Adam(dbo_model.parameters(), lr=5e-4, weight_decay=1e-5)  # 统一优化器配置
+        scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=3, gamma=0.8)  # 统一调度器
         criterion = torch.nn.MSELoss()
         
-        for epoch in range(4):  # 4个epoch平衡速度和效果
+        best_loss = float('inf')
+        for epoch in range(8):  # 统一训练轮数：8个epoch
             optimizer.zero_grad()
             output_z = dbo_model(features_tensor, adjs)
             
-            # 只用显式损失（loss_dis）
-            target_sim = features_norm[0] @ features_norm[0].t()
-            pred_sim = output_z @ output_z.t()
-            loss = criterion(pred_sim, target_sim)
+            # 统一损失函数：显式+隐式损失（与MV-DBO一致）
+            loss_dis = torch.tensor(0., device=device)
+            loss_lap = torch.tensor(0., device=device)
             
-            loss.backward()
+            for k in range(n_view):
+                # 显式损失：特征重构
+                target_sim = features_norm[k] @ features_norm[k].t()
+                pred_sim = output_z @ output_z.t()
+                loss_dis += criterion(pred_sim, target_sim)
+                
+                # 隐式损失：图拉普拉斯正则化
+                loss_lap += criterion(pred_sim, adjs[k])
+            
+            # 统一总损失权重
+            total_loss = loss_dis + 0.3 * loss_lap
+            
+            total_loss.backward()
+            torch.nn.utils.clip_grad_norm_(dbo_model.parameters(), max_norm=1.0)  # 统一梯度裁剪
             optimizer.step()
+            scheduler.step()
+            
+            if total_loss.item() < best_loss:
+                best_loss = total_loss.item()
+            
+            if epoch % 2 == 0:
+                print(f"[LFighter-DBO] Epoch {epoch+1}: Loss={total_loss.item():.6f}")
         
-        # 获取聚类结果
+        # 统一聚类评估流程（与MV-DBO一致）
         dbo_model.eval()
         with torch.no_grad():
             output_z = dbo_model(features_tensor, adjs)
         
         z_np = output_z.detach().cpu().numpy()
-        kmeans = KMeans(n_clusters=2, random_state=0).fit(z_np)
-        labels = kmeans.labels_
         
-        # 选择更好的聚类
+        # 增强聚类评估（与MV-DBO一致）
+        best_labels = None
+        best_score = -1
+        for seed in [0, 42, 123]:
+            kmeans = KMeans(n_clusters=2, random_state=seed, n_init=10).fit(z_np)
+            labels = kmeans.labels_
+            
+            # 计算聚类质量
+            from sklearn.metrics import silhouette_score
+            if len(set(labels)) > 1:
+                score = silhouette_score(z_np, labels)
+                if score > best_score:
+                    best_score = score
+                    best_labels = labels
+        
+        if best_labels is None:
+            best_labels = KMeans(n_clusters=2, random_state=0).fit(z_np).labels_
+        
+        # 统一聚类选择策略（与MV-DBO一致）
         clusters = {0: [], 1: []}
-        for i, l in enumerate(labels):
+        for i, l in enumerate(best_labels):
             clusters[l].append(z_np[i])
         
-        # 简单的聚类评估：选择更紧密的聚类
+        # 综合评估：内聚性+分离性（与MV-DBO一致）
         good_cl = 0
         if len(clusters[0]) > 0 and len(clusters[1]) > 0:
-            var0 = np.var([np.linalg.norm(z) for z in clusters[0]])
-            var1 = np.var([np.linalg.norm(z) for z in clusters[1]])
-            good_cl = 0 if var0 < var1 else 1  # 选择方差更小的聚类
+            # 计算类内紧密度
+            intra_0 = np.mean([np.linalg.norm(z - np.mean(clusters[0], axis=0)) for z in clusters[0]])
+            intra_1 = np.mean([np.linalg.norm(z - np.mean(clusters[1], axis=0)) for z in clusters[1]])
+            # 计算类间距离
+            inter_dist = np.linalg.norm(np.mean(clusters[0], axis=0) - np.mean(clusters[1], axis=0))
+            
+            # 选择内聚性更好的聚类
+            ratio_0 = intra_0 / (inter_dist + 1e-8)
+            ratio_1 = intra_1 / (inter_dist + 1e-8)
+            good_cl = 0 if ratio_0 < ratio_1 else 1
         
         # 权重分配
         scores = np.ones(m)
-        for i, l in enumerate(labels):
+        for i, l in enumerate(best_labels):
             if l != good_cl:
                 scores[i] = 0
         
+        print(f"[LFighter-DBO] Silhouette score: {best_score:.4f}")
+        print(f"[LFighter-DBO] Selected good cluster: {good_cl}")
         print(f"[LFighter-DBO] Good clients: {np.sum(scores)}/{m}")
         return average_weights(local_weights, scores)
 
@@ -307,11 +444,42 @@ class LFighterMV:
         
         m = len(local_weights)
         
-        # 视图1: 输出层梯度（权重差异）
+        # 视图1: 输出层梯度（权重差异）- 与原版LFighter保持一致
         output_grad_features = []
+        
+        # 首先计算所有类别的梯度差异来检测最异常的两个类别（与LFighter保持一致）
+        global_params = list(simulation_model.parameters())
+        
+        # 计算所有客户端的输出层偏置差异，用于检测异常类别
+        memory = np.zeros(global_params[-1].shape[0])  # 输出层偏置的维度
+        
         for i in range(m):
-            output_grad = list(simulation_model.parameters())[-2].cpu().data.numpy() - list(local_models[i].parameters())[-2].cpu().data.numpy()
-            output_grad_features.append(output_grad.reshape(-1))
+            local_model = copy.deepcopy(simulation_model)
+            local_model.load_state_dict(local_weights[i])
+            local_params = list(local_model.parameters())
+            
+            # 计算权重和偏置的差异
+            dw = global_params[-2].cpu().data.numpy() - local_params[-2].cpu().data.numpy()
+            db = global_params[-1].cpu().data.numpy() - local_params[-1].cpu().data.numpy()
+            
+            # 累积异常程度（与原版LFighter的逻辑一致）
+            norms = np.linalg.norm(dw, axis=-1)
+            memory += norms + np.abs(db)
+        
+        # 找到最异常的两个类别（与原版LFighter一致）
+        max_two_freq_classes = memory.argsort()[-2:]
+        print(f'[LFighter-MV] Detected anomalous classes (same as LFighter): {max_two_freq_classes}')
+        
+        # 现在只提取这两个类别的输出层梯度
+        for i in range(m):
+            local_model = copy.deepcopy(simulation_model)
+            local_model.load_state_dict(local_weights[i])
+            local_params = list(local_model.parameters())
+            
+            # 只提取最异常两个类别的权重差异（与LFighter完全一致）
+            output_grad = global_params[-2].cpu().data.numpy() - local_params[-2].cpu().data.numpy()
+            key_classes_grad = output_grad[max_two_freq_classes].reshape(-1)
+            output_grad_features.append(key_classes_grad)
         
         # 视图2: 第一层激活值（从local_features中提取）
         first_activation_features = []
@@ -586,69 +754,120 @@ class LFighterMVDBO:
         
         global_model = list(simulation_model.parameters())
         
-        # 视图1：权重梯度特征（全部层）
+        # 视图1：输出层梯度特征（与LFighter保持一致）- 只用最异常的两个类别
         weight_gradients = []
-        for i in range(m):
-            all_grads = []
-            for j in range(-3, 0):  # 最后三层
-                grad = global_model[j].cpu().data.numpy() - local_models[i][j].cpu().data.numpy()
-                all_grads.extend(grad.flatten())
-            weight_gradients.append(np.array(all_grads))
         
-        # 视图2：多视图网络特征
-        network_features = []
-        for peer_features in local_features:
-            if peer_features and len(peer_features) > 0:
+        # 首先检测最异常的两个类别（与LFighter和LFighter-MV一致）
+        memory = np.zeros(global_model[-1].shape[0])  # 输出层偏置的维度
+        
+        for i in range(m):
+            # 计算权重和偏置的差异
+            dw = global_model[-2].cpu().data.numpy() - local_models[i][-2].cpu().data.numpy()
+            db = global_model[-1].cpu().data.numpy() - local_models[i][-1].cpu().data.numpy()
+            
+            # 累积异常程度（与原版LFighter的逻辑一致）
+            norms = np.linalg.norm(dw, axis=-1)
+            memory += norms + np.abs(db)
+        
+        # 找到最异常的两个类别
+        max_two_freq_classes = memory.argsort()[-2:]
+        print(f'[LFighter-MV-DBO] Detected anomalous classes (same as LFighter): {max_two_freq_classes}')
+        
+        # 只提取这两个类别的输出层梯度
+        for i in range(m):
+            output_grad = global_model[-2].cpu().data.numpy() - local_models[i][-2].cpu().data.numpy()
+            key_classes_grad = output_grad[max_two_freq_classes].reshape(-1)
+            weight_gradients.append(key_classes_grad)
+        
+        # 视图2：第一层激活值（与LFighter-MV完全一致）
+        first_activation_features = []
+        for i, peer_features in enumerate(local_features):
+            if not peer_features or len(peer_features) == 0:
+                raise ValueError(f"Empty peer_features for peer {i}. Check feature extraction during training.")
+            
+            # 处理可能的嵌套结构（与LFighter-MV相同的逻辑）
+            actual_features = peer_features
+            
+            # 检查是否是嵌套结构（list of lists）
+            if isinstance(peer_features, (list, tuple)) and len(peer_features) > 0:
                 if isinstance(peer_features[0], (list, tuple)):
-                    # 多视图：融合所有视图
-                    all_views = []
-                    for view in peer_features[0]:
-                        if hasattr(view, 'detach'):
-                            all_views.extend(view.detach().cpu().numpy().flatten())
-                    network_features.append(np.array(all_views))
-                else:
-                    # 单视图
-                    if hasattr(peer_features[0], 'detach'):
-                        network_features.append(peer_features[0].detach().cpu().numpy().flatten())
+                    # 如果是嵌套的，取第一个元素
+                    actual_features = peer_features[0]
+            
+            # 检查actual_features是否符合预期格式
+            if not isinstance(actual_features, (list, tuple)) or len(actual_features) < 2:
+                raise ValueError(f"Invalid features structure for peer {i}: expected list/tuple with >=2 elements, got {type(actual_features)} with length {len(actual_features) if hasattr(actual_features, '__len__') else 'unknown'}")
+            
+            # 从CNNPATHMNIST的return_features中提取第一层激活值（索引1）
+            first_activation = actual_features[1]  # first_layer_activation
+            
+            if not hasattr(first_activation, 'detach'):
+                # 如果first_activation不是tensor，尝试转换
+                if isinstance(first_activation, (list, tuple)):
+                    if len(first_activation) > 0 and hasattr(first_activation[0], 'detach'):
+                        first_activation = first_activation[0]
                     else:
-                        raise ValueError(f"Expected tensor with .detach() method in MV-DBO network features but got {type(peer_features[0])}. Check model return_features implementation.")
-            else:
-                raise ValueError(f"Expected non-empty peer_features in MV-DBO but got empty or None for a peer. Check feature extraction during training.")
+                        raise ValueError(f"Cannot convert first_activation to tensor for peer {i}: {type(first_activation)}")
+                else:
+                    raise ValueError(f"Expected tensor with .detach() method for peer {i}, got {type(first_activation)}")
+            
+            # 只取第一个样本的激活值作为代表
+            first_activation_flat = first_activation[0].detach().cpu().numpy().flatten()
+            first_activation_features.append(first_activation_flat)
         
-        # 视图3：高阶统计特征
-        stat_features = []
+        # 视图3：输入层梯度（与LFighter-MV完全一致）
+        input_grad_features = []
         for i in range(m):
-            stats = []
-            for param in local_models[i]:
-                p = param.cpu().data.numpy().flatten()
-                stats.extend([
-                    np.mean(p), np.std(p), np.var(p),
-                    np.min(p), np.max(p), np.median(p),
-                    np.linalg.norm(p, ord=1), np.linalg.norm(p, ord=2)
-                ])
-            stat_features.append(np.array(stats))
+            # 获取第一层卷积层的权重梯度（conv1权重）
+            input_grad = global_model[0].cpu().data.numpy() - local_models[i][0].cpu().data.numpy()
+            input_grad_features.append(input_grad.reshape(-1))
         
-        # 对齐特征维度
-        min_weight = min(len(f) for f in weight_gradients)
-        min_network = min(len(f) for f in network_features)
-        min_stat = min(len(f) for f in stat_features)
+        # 智能维度处理（与LFighter-MV完全一致）
+        def smart_dimension_reduction(features, target_dim=200, method='auto', standardize=True):
+            """智能维度缩减：标准化 + PCA/裁剪，考虑样本数限制"""
+            features_array = np.array(features)
+            n_samples, original_dim = features_array.shape
+            
+            # 1. 强烈建议的标准化处理（均值0，方差1）
+            if standardize:
+                from sklearn.preprocessing import StandardScaler
+                scaler = StandardScaler()
+                features_array = scaler.fit_transform(features_array)
+                std_info = "standardized"
+            else:
+                std_info = "raw"
+            
+            # 2. PCA最大维度不能超过min(样本数, 特征数)
+            max_pca_components = min(n_samples, original_dim)
+            effective_target_dim = min(target_dim, max_pca_components)
+            
+            if original_dim <= effective_target_dim:
+                # 维度已经足够小，直接返回标准化后的特征
+                return features_array, f"keep_all_{original_dim}_{std_info}"
+            elif original_dim <= effective_target_dim * 2:
+                # 维度适中，使用简单裁剪（速度优先）
+                return features_array[:, :effective_target_dim], f"truncate_{effective_target_dim}_{std_info}"
+            else:
+                # 维度很大，使用PCA降维（信息保留优先）
+                if method == 'pca' or method == 'auto':
+                    from sklearn.decomposition import PCA
+                    pca = PCA(n_components=effective_target_dim, random_state=42)
+                    reduced_features = pca.fit_transform(features_array)
+                    explained_ratio = np.sum(pca.explained_variance_ratio_)
+                    return reduced_features, f"pca_{effective_target_dim}_var{explained_ratio:.3f}_{std_info}"
+                else:
+                    return features_array[:, :effective_target_dim], f"truncate_{effective_target_dim}_{std_info}"
+        
+        # 对三个视图分别进行智能降维（与LFighter-MV一致）
+        output_reduced, output_method = smart_dimension_reduction(weight_gradients, target_dim=200)
+        activation_reduced, activation_method = smart_dimension_reduction(first_activation_features, target_dim=200)
+        input_reduced, input_method = smart_dimension_reduction(input_grad_features, target_dim=200)
+        
+        print(f"[LFighter-MV-DBO] View reduction methods: output={output_method}, activation={activation_method}, input={input_method}")
         
         # 构建多视图特征矩阵
-        view_features = []
-        nfeats = []
-        
-        # 处理三个视图
-        for view_data, target_dim in [(weight_gradients, min_weight), 
-                                     (network_features, min_network),
-                                     (stat_features, min_stat)]:
-            aligned_data = []
-            for i in range(m):
-                data = view_data[i][:target_dim] if len(view_data[i]) > target_dim else view_data[i]
-                if len(data) < target_dim:
-                    data = np.pad(data, (0, target_dim - len(data)), 'constant')
-                aligned_data.append(data)
-            view_features.append(np.array(aligned_data))
-            nfeats.append(target_dim)
+        view_features = [output_reduced, activation_reduced, input_reduced]
+        nfeats = [f.shape[1] for f in view_features]
         
         n_view = len(view_features)
         print(f"[LFighter-MV-DBO] Multi-view features: {[f.shape for f in view_features]}")

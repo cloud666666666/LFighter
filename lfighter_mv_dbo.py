@@ -7,7 +7,7 @@ RULE = 'lfighter_mv_dbo'
 ATTACK_TYPE = 'label_flipping'
 MALICIOUS_BEHAVIOR_RATE = 1
 os.makedirs('log', exist_ok=True)
-for atr in [0.4]:
+for atr in [0.1, 0.2, 0.3, 0.4, 0.5]:  # 统一攻击者比例
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
     LOG_FILE = f"log/lfighter_mv_dbo_{config.LOG_DIST_TYPE}_source{config.SOURCE_CLASS}_target{config.TARGET_CLASS}_atr{atr}_{timestamp}.log"
     run_exp(dataset_name = config.DATASET_NAME, model_name = config.MODEL_NAME, dd_type = config.DD_TYPE, num_peers = config.NUM_PEERS, 

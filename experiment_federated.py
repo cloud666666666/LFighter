@@ -1,5 +1,6 @@
 from environment_federated import *
 import logging
+import time
 
 def run_exp(dataset_name, model_name, dd_type,
     num_peers, frac_peers, seed, test_batch_size, criterion, global_rounds, 
@@ -43,9 +44,15 @@ def run_exp(dataset_name, model_name, dd_type,
     # flEnv.simulate(attack_type = attack_type, malicious_behavior_rate = malicious_behavior_rate,
     #                 from_class = from_class, to_class = to_class,
     #                  rule=rule)
-    flEnv.run_experiment(attack_type = attack_type, malicious_behavior_rate = malicious_behavior_rate, 
+    start_time = time.time()
+    final_accuracy, final_asr = flEnv.run_experiment(attack_type = attack_type, malicious_behavior_rate = malicious_behavior_rate, 
                     source_class = source_class, target_class = target_class, 
                     rule=rule, resume = resume, log_file=log_file)
+    total_runtime = time.time() - start_time
+    
     msg = f"\n--> End of Experiment."
     print(msg)
     logging.info(msg)
+    
+    # 返回关键实验结果
+    return final_accuracy, final_asr, total_runtime

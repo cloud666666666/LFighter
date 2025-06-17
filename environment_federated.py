@@ -705,3 +705,8 @@ class FL:
         print('Test loss:', test_losses)
         print('Attack succes rate:', asr)
         print('Average CPU aggregation runtime:', np.mean(cpu_runtimes))
+        
+        # 返回最终结果给调用者
+        final_accuracy = global_accuracies[-1] if global_accuracies else 0.0
+        final_asr = asr if 'asr' in locals() else 0.0
+        return final_accuracy, final_asr
