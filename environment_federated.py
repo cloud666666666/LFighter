@@ -500,7 +500,14 @@ class FL:
 
             elif rule == 'lfighter_mv_dbo':
                 cur_time = time.time()
-                global_weights = lfighter_mv_dbo.aggregate(simulation_model, local_weights, all_local_features)
+                result = lfighter_mv_dbo.aggregate(simulation_model, local_weights, all_local_features)
+                if isinstance(result, tuple):
+                    global_weights, view_weights_info = result
+                    # 格式化视图权重信息用于日志
+                    view_weights_str = f"Output:{view_weights_info['output_grad']:.3f},Activation:{view_weights_info['first_activation']:.3f},Input:{view_weights_info['input_grad']:.3f}"
+                else:
+                    global_weights = result
+                    view_weights_str = "N/A"
                 cpu_runtimes.append(time.time() - cur_time)
 
             elif rule == 'fedavg':
@@ -551,7 +558,7 @@ class FL:
             performed_attacks.append(attacks) 
             
             # 每轮训练结束后写日志 (现在包含ASR)
-            if rule == 'lfighter_mv' and view_weights_str is not None:
+            if (rule == 'lfighter_mv' or rule == 'lfighter_mv_dbo') and 'view_weights_str' in locals() and view_weights_str is not None:
                 log_msg = (
                     f"Round {epoch+1}/{self.global_rounds} | "
                     f"Global Acc: {current_accuracy:.2f} | "
