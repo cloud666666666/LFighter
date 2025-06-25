@@ -14,6 +14,9 @@ from scipy.stats import entropy
 from sklearn.cluster import KMeans
 from utils import *
 from sklearn.preprocessing import StandardScaler
+import torch.nn as nn
+import torch.optim as optim
+
 def get_pca(data, threshold = 0.99):
     normalized_data = StandardScaler().fit_transform(data)
     pca = PCA()
@@ -25,7 +28,9 @@ def get_pca(data, threshold = 0.99):
     # print('Number of components with variance <= {:0.0f}%: {}'.format(threshold*100, len(select_pcas)))
     reduced_data = reduced_data[:, select_pcas]
     return reduced_data
+
 eps = np.finfo(float).eps
+
 class LFD():
     def __init__(self, num_classes):
         self.memory = np.zeros([num_classes])
@@ -1184,3 +1189,243 @@ def Krum(updates, f, multi = False):
     else:
       return idxs[0]
 ##################################################################
+
+class LFighterAutoencoder:
+    def __init__(self, num_classes, ae_hidden_dim=128, ae_latent_dim=32, ae_epochs=50, reconstruction_weight=0.3):
+        """
+        LFighter with Autoencoder optimization
+        
+        Args:
+            num_classes: 类别数量
+            ae_hidden_dim: autoencoder隐藏层维度
+            ae_latent_dim: autoencoder潜在空间维度  
+            ae_epochs: autoencoder训练轮数
+            reconstruction_weight: 重构误差在最终得分中的权重
+        """
+        self.memory = np.zeros([num_classes])
+        self.ae_hidden_dim = ae_hidden_dim
+        self.ae_latent_dim = ae_latent_dim
+        self.ae_epochs = ae_epochs
+        self.reconstruction_weight = reconstruction_weight
+    
+    def clusters_dissimilarity(self, clusters):
+        """计算聚类间相异性（重用LFD的方法）"""
+        n0 = len(clusters[0])
+        n1 = len(clusters[1])
+        m = n0 + n1 
+        cs0 = smp.cosine_similarity(clusters[0]) - np.eye(n0)
+        cs1 = smp.cosine_similarity(clusters[1]) - np.eye(n1)
+        mincs0 = np.min(cs0, axis=1)
+        mincs1 = np.min(cs1, axis=1)
+        ds0 = n0/m * (1 - np.mean(mincs0))
+        ds1 = n1/m * (1 - np.mean(mincs1))
+        return ds0, ds1
+    
+    def create_autoencoder(self, input_dim, device):
+        """创建autoencoder模型"""
+        class SimpleAutoencoder(nn.Module):
+            def __init__(self, input_dim, hidden_dim, latent_dim):
+                super(SimpleAutoencoder, self).__init__()
+                # 编码器
+                self.encoder = nn.Sequential(
+                    nn.Linear(input_dim, hidden_dim),
+                    nn.ReLU(),
+                    nn.BatchNorm1d(hidden_dim),
+                    nn.Dropout(0.1),
+                    nn.Linear(hidden_dim, latent_dim),
+                    nn.ReLU()
+                )
+                # 解码器
+                self.decoder = nn.Sequential(
+                    nn.Linear(latent_dim, hidden_dim),
+                    nn.ReLU(),
+                    nn.BatchNorm1d(hidden_dim),
+                    nn.Dropout(0.1),
+                    nn.Linear(hidden_dim, input_dim)
+                )
+            
+            def forward(self, x):
+                encoded = self.encoder(x)
+                decoded = self.decoder(encoded)
+                return encoded, decoded
+        
+        return SimpleAutoencoder(input_dim, self.ae_hidden_dim, self.ae_latent_dim).to(device)
+    
+    def train_autoencoder(self, features, device):
+        """训练autoencoder并返回潜在表示和重构误差"""
+        features_tensor = torch.FloatTensor(features).to(device)
+        input_dim = features_tensor.shape[1]
+        
+        # 创建autoencoder
+        autoencoder = self.create_autoencoder(input_dim, device)
+        optimizer = optim.Adam(autoencoder.parameters(), lr=0.001, weight_decay=1e-5)
+        criterion = nn.MSELoss()
+        
+        # 训练autoencoder
+        autoencoder.train()
+        for epoch in range(self.ae_epochs):
+            optimizer.zero_grad()
+            encoded, decoded = autoencoder(features_tensor)
+            loss = criterion(decoded, features_tensor)
+            loss.backward()
+            optimizer.step()
+            
+            if epoch % 10 == 0:
+                print(f'[LFighter-AE] Autoencoder Epoch {epoch+1}/{self.ae_epochs}: Loss={loss.item():.6f}')
+        
+        # 获取潜在表示和重构误差
+        autoencoder.eval()
+        with torch.no_grad():
+            encoded, decoded = autoencoder(features_tensor)
+            reconstruction_errors = torch.mean((features_tensor - decoded) ** 2, dim=1)
+        
+        return encoded.cpu().numpy(), reconstruction_errors.cpu().numpy()
+    
+    def aggregate(self, global_model, local_models, ptypes):
+        """基于LFighter + Autoencoder的聚合方法"""
+        import config
+        device = getattr(config, 'DEVICE', 'cpu')
+        
+        local_weights = [copy.deepcopy(model).state_dict() for model in local_models]
+        m = len(local_models)
+        
+        # 转换为参数列表（与原LFighter一致）
+        for i in range(m):
+            local_models[i] = list(local_models[i].parameters())
+        global_model = list(global_model.parameters())
+        
+        # 计算梯度差异（与原LFighter一致）
+        dw = [None for i in range(m)]
+        db = [None for i in range(m)]
+        for i in range(m):
+            dw[i] = global_model[-2].cpu().data.numpy() - local_models[i][-2].cpu().data.numpy()
+            db[i] = global_model[-1].cpu().data.numpy() - local_models[i][-1].cpu().data.numpy()
+        dw = np.asarray(dw)
+        db = np.asarray(db)
+
+        # 处理二分类情况（与原LFighter一致）
+        if len(db[0]) <= 2:
+            data = []
+            for i in range(m):
+                data.append(dw[i].reshape(-1))
+            
+            # 使用autoencoder进行特征学习
+            latent_features, reconstruction_errors = self.train_autoencoder(data, device)
+            
+            # 原始K-means聚类（在潜在空间中）
+            kmeans = KMeans(n_clusters=2, random_state=0).fit(latent_features)
+            labels = kmeans.labels_
+
+            clusters = {0: [], 1: []}
+            for i, l in enumerate(labels):
+                clusters[l].append(latent_features[i])
+
+            # 聚类质量评估
+            good_cl = 0
+            cs0, cs1 = self.clusters_dissimilarity(clusters)
+            if cs0 < cs1:
+                good_cl = 1
+
+            # 结合聚类结果和重构误差计算最终得分
+            cluster_scores = np.ones([m])
+            for i, l in enumerate(labels):
+                if l != good_cl:
+                    cluster_scores[i] = 0
+            
+            # 重构误差归一化（误差越大，得分越低）
+            normalized_recon_errors = (reconstruction_errors - reconstruction_errors.min()) / (reconstruction_errors.max() - reconstruction_errors.min() + 1e-8)
+            recon_scores = 1 - normalized_recon_errors
+            
+            # 组合得分：聚类得分和重构得分加权平均
+            final_scores = (1 - self.reconstruction_weight) * cluster_scores + self.reconstruction_weight * recon_scores
+            
+            print(f'[LFighter-AE] Cluster quality: cs0={cs0:.4f}, cs1={cs1:.4f}, good_cluster={good_cl}')
+            print(f'[LFighter-AE] Reconstruction errors: mean={reconstruction_errors.mean():.4f}, std={reconstruction_errors.std():.4f}')
+            
+            global_weights = average_weights(local_weights, final_scores)
+            return global_weights
+
+        # 处理多分类情况
+        # 检测异常类别（与原LFighter一致）
+        norms = np.linalg.norm(dw, axis=-1)
+        self.memory = np.sum(norms, axis=0)
+        self.memory += np.sum(abs(db), axis=0)
+        max_two_freq_classes = self.memory.argsort()[-2:]
+        print(f'[LFighter-AE] Potential source and target classes: {max_two_freq_classes}')
+        
+        # 提取关键类别的特征
+        data = []
+        for i in range(m):
+            data.append(dw[i][max_two_freq_classes].reshape(-1))
+
+        # 统一降维处理（与原LFighter一致）
+        def unified_dimension_reduction(features, target_dim=200, method='auto', standardize=True):
+            features_array = np.array(features)
+            n_samples, original_dim = features_array.shape
+            
+            if standardize:
+                from sklearn.preprocessing import StandardScaler
+                scaler = StandardScaler()
+                features_array = scaler.fit_transform(features_array)
+                std_info = "standardized"
+            else:
+                std_info = "raw"
+            
+            max_pca_components = min(n_samples, original_dim)
+            effective_target_dim = min(target_dim, max_pca_components)
+            
+            if original_dim <= effective_target_dim:
+                return features_array, f"keep_all_{original_dim}_{std_info}"
+            elif original_dim <= effective_target_dim * 2:
+                return features_array[:, :effective_target_dim], f"truncate_{effective_target_dim}_{std_info}"
+            else:
+                from sklearn.decomposition import PCA
+                pca = PCA(n_components=effective_target_dim, random_state=42)
+                reduced_features = pca.fit_transform(features_array)
+                explained_ratio = np.sum(pca.explained_variance_ratio_)
+                return reduced_features, f"pca_{effective_target_dim}_var{explained_ratio:.3f}_{std_info}"
+        
+        # 应用降维
+        data_reduced, reduction_method = unified_dimension_reduction(data, target_dim=200)
+        print(f'[LFighter-AE] Applied dimension reduction: {reduction_method}')
+        
+        # 使用autoencoder进行深度特征学习
+        latent_features, reconstruction_errors = self.train_autoencoder(data_reduced, device)
+        
+        # 在潜在空间中进行聚类
+        kmeans = KMeans(n_clusters=2, random_state=0).fit(latent_features)
+        labels = kmeans.labels_
+
+        clusters = {0: [], 1: []}
+        for i, l in enumerate(labels):
+            clusters[l].append(latent_features[i])
+
+        # 聚类质量评估
+        good_cl = 0
+        cs0, cs1 = self.clusters_dissimilarity(clusters)
+        if cs0 < cs1:
+            good_cl = 1
+
+        # 结合聚类结果和重构误差
+        cluster_scores = np.ones([m])
+        for i, l in enumerate(labels):
+            if l != good_cl:
+                cluster_scores[i] = 0
+        
+        # 重构误差得分（误差越大，越可能是攻击者）
+        normalized_recon_errors = (reconstruction_errors - reconstruction_errors.min()) / (reconstruction_errors.max() - reconstruction_errors.min() + 1e-8)
+        recon_scores = 1 - normalized_recon_errors
+        
+        # 组合最终得分
+        final_scores = (1 - self.reconstruction_weight) * cluster_scores + self.reconstruction_weight * recon_scores
+        
+        # 设置阈值：只有组合得分超过0.5的客户端被认为是好的
+        binary_scores = (final_scores > 0.5).astype(float)
+        
+        print(f'[LFighter-AE] Cluster quality: cs0={cs0:.4f}, cs1={cs1:.4f}, good_cluster={good_cl}')
+        print(f'[LFighter-AE] Reconstruction errors: mean={reconstruction_errors.mean():.4f}, std={reconstruction_errors.std():.4f}')
+        print(f'[LFighter-AE] Final scores: {final_scores}')
+        print(f'[LFighter-AE] Selected good clients: {np.sum(binary_scores)}/{m}')
+        
+        global_weights = average_weights(local_weights, binary_scores)
+        return global_weights

@@ -27,7 +27,7 @@ from sklearn.neighbors import kneighbors_graph
 from sklearn.cluster import KMeans
 from sklearn.metrics.pairwise import cosine_similarity
 import pickle
-from datetime import datetime
+# from datetime import datetime  # 已移除时间戳，不再需要
 
 # DBONet 数据归一化函数 (来自原文)
 def normalization(data):
@@ -349,8 +349,8 @@ class FL:
         
     def run_experiment(self, attack_type = 'no_attack', malicious_behavior_rate = 0,
         source_class = None, target_class = None, rule = 'fedavg', resume = False, log_file="experiment.log"):
-        # 生成时间戳
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        # 时间戳已移除，使用固定命名方式
+        # timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         
         logging.basicConfig(filename=log_file,
                             filemode='a',
@@ -364,6 +364,7 @@ class FL:
         lfighter_dbo = LFighterDBO()
         lfighter_mv = LFighterMV()
         lfighter_mv_dbo = LFighterMVDBO()
+        lfighter_ae = LFighterAutoencoder(self.num_classes)
         # copy weights
         global_weights = simulation_model.state_dict()
         last10_updates = []
@@ -510,6 +511,11 @@ class FL:
                     view_weights_str = "N/A"
                 cpu_runtimes.append(time.time() - cur_time)
 
+            elif rule == 'lfighter_ae':
+                cur_time = time.time()
+                global_weights = lfighter_ae.aggregate(copy.deepcopy(simulation_model), copy.deepcopy(local_models), peers_types)
+                cpu_runtimes.append(time.time() - cur_time)
+
             elif rule == 'fedavg':
                 cur_time = time.time()
                 global_weights = average_weights(local_weights, [1 for i in range(len(local_weights))])
@@ -590,7 +596,7 @@ class FL:
                 'global_accuracies': global_accuracies,
                 'source_class_accuracies': source_class_accuracies
                 }
-            savepath = './checkpoints/'+ self.dataset_name + '_' + self.model_name + '_' + self.dd_type + '_'+ rule + '_'+ str(self.attackers_ratio) + '_' + str(self.local_epochs) + '_' + timestamp + '.t7'
+            savepath = './checkpoints/'+ self.dataset_name + '_' + self.model_name + '_' + self.dd_type + '_'+ rule + '_'+ str(self.attackers_ratio) + '_' + str(self.local_epochs) + '.t7'
             torch.save(state,savepath)
 
             del local_models
@@ -705,7 +711,7 @@ class FL:
                 'asr':asr,
                 'avg_cpu_runtime':np.mean(cpu_runtimes)
                 }
-        savepath = './results/'+ self.dataset_name + '_' + self.model_name + '_' + self.dd_type + '_'+ rule + '_'+ str(self.attackers_ratio) + '_' + str(self.local_epochs) + '_' + timestamp + '.t7'
+        savepath = './results/'+ self.dataset_name + '_' + self.model_name + '_' + self.dd_type + '_'+ rule + '_'+ str(self.attackers_ratio) + '_' + str(self.local_epochs) + '.t7'
         torch.save(state,savepath)            
         print('Global accuracies: ', global_accuracies)
         print('Class {} accuracies: '.format(source_class), source_class_accuracies)
