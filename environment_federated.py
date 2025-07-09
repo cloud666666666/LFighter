@@ -72,7 +72,8 @@ class Peer():
         self.peer_type = peer_type
 #======================================= Start of training function ===========================================================#
     def participant_update(self, global_epoch, model, attack_type = 'no_attack', malicious_behavior_rate = 0, 
-                            source_class = None, target_class = None, dataset_name = None, rule = 'fedavg') :
+                            source_class = None, target_class = None, dataset_name = None, rule = 'fedavg',
+                            attack_config = None) :
         epochs = self.local_epochs
         train_loader = DataLoader(self.local_data, self.local_bs, shuffle = True, drop_last=True)
         attacked = 0
@@ -82,12 +83,116 @@ class Peer():
             r = np.random.random()
             if r <= malicious_behavior_rate:
                 if dataset_name != 'IMDB':
-                    poisoned_data = label_filp(self.local_data, source_class, target_class)
+                    # 使用复杂攻击配置或简单攻击
+                    poisoned_data = label_filp(self.local_data, source_class, target_class, 
+                                             attack_config, global_epoch, self.peer_pseudonym)
                     train_loader = DataLoader(poisoned_data, self.local_bs, shuffle = True, drop_last=True)
                 self.performed_attacks+=1
                 attacked = 1
-                print('Label flipping attack launched by', self.peer_pseudonym, 'to flip class ', source_class,
-                ' to class ', target_class)
+                
+                # 根据攻击类型打印详细的攻击信息（仅在第一轮显示，用于debug）
+                if attack_config and global_epoch == 0:
+                    attack_type_name = attack_config.get('type', 'unknown')
+                    
+                    print(f'🔴 标签翻转攻击 [{self.peer_pseudonym}] (第{global_epoch}轮):')
+                    print(f'   攻击类型: {attack_type_name}')
+                    print(f'   累计攻击次数: {self.performed_attacks + 1}')
+                    
+                    if attack_type_name == 'multi_target':
+                        # 多目标攻击的详细信息
+                        mappings = attack_config.get('mappings', {})
+                        flip_probs = attack_config.get('flip_probabilities', {})
+                        print(f'   攻击模式: 多源-多目标标签翻转')
+                        mapping_str = ', '.join([f'{src}→{tgt}' for src, tgt in mappings.items()])
+                        print(f'   映射关系: [{mapping_str}]')
+                        if flip_probs:
+                            prob_str = ', '.join([f'{src}({prob*100:.0f}%)' for src, prob in flip_probs.items()])
+                            print(f'   翻转概率: [{prob_str}]')
+                            
+                    elif attack_type_name == 'probabilistic':
+                        # 概率性攻击的详细信息
+                        source_classes = attack_config.get('source_classes', [])
+                        target_classes = attack_config.get('target_classes', [])
+                        flip_rate = attack_config.get('flip_rate', 0.6)
+                        randomize = attack_config.get('randomize_targets', False)
+                        print(f'   攻击模式: 概率性随机标签翻转')
+                        print(f'   源类别: {source_classes}')
+                        print(f'   目标类别: {target_classes}')
+                        print(f'   翻转概率: {flip_rate*100:.1f}%')
+                        print(f'   随机化: {"是" if randomize else "否"}')
+                        
+                    elif attack_type_name == 'time_varying':
+                        # 时变攻击的详细信息
+                        phases = attack_config.get('phases', [])
+                        current_phase = None
+                        phase_idx = 0
+                        for i, phase in enumerate(phases):
+                            epoch_range = phase['epochs']
+                            if epoch_range[0] <= global_epoch < epoch_range[1]:
+                                current_phase = phase
+                                phase_idx = i + 1
+                                break
+                        print(f'   攻击模式: 时变标签翻转')
+                        print(f'   当前阶段: {phase_idx}/{len(phases)}')
+                        if current_phase:
+                            mapping_str = ', '.join([f'{src}→{tgt}' for src, tgt in current_phase["mapping"].items()])
+                            print(f'   当前映射: [{mapping_str}]')
+                            print(f'   当前翻转率: {current_phase.get("flip_rate", 1.0)*100:.1f}%')
+                        
+                    elif attack_type_name == 'adaptive':
+                        # 自适应攻击的详细信息
+                        stealth_mapping = attack_config.get('stealth_mapping', {})
+                        aggressive_mapping = attack_config.get('aggressive_mapping', {})
+                        threshold = attack_config.get('detection_threshold', 0.7)
+                        print(f'   攻击模式: 自适应标签翻转')
+                        print(f'   检测阈值: {threshold}')
+                        stealth_str = ', '.join([f'{src}→{tgt}' for src, tgt in stealth_mapping.items()])
+                        aggressive_str = ', '.join([f'{src}→{tgt}' for src, tgt in aggressive_mapping.items()])
+                        print(f'   隐蔽映射: [{stealth_str}]')
+                        print(f'   激进映射: [{aggressive_str}]')
+                        
+                    elif attack_type_name == 'mixed':
+                        # 混合攻击的详细信息
+                        label_flip_prob = attack_config.get('label_flip_prob', 0.6)
+                        noise_prob = attack_config.get('noise_only_prob', 0.2)
+                        mappings = attack_config.get('mappings', {})
+                        print(f'   攻击模式: 混合策略攻击')
+                        print(f'   标签翻转: {label_flip_prob*100:.1f}% | 纯噪声: {noise_prob*100:.1f}%')
+                        mapping_str = ', '.join([f'{src}→{tgt}' for src, tgt in mappings.items()])
+                        print(f'   映射关系: [{mapping_str}]')
+                        
+                    else:
+                        # 简单攻击或未知攻击类型
+                        print(f'   攻击模式: 简单固定映射')
+                        print(f'   映射关系: [{source_class}→{target_class}]')
+                        
+                elif global_epoch == 0:
+                    # 无攻击配置的传统简单攻击（仅在第一轮显示，用于debug）
+                    print(f'🔴 标签翻转攻击 [{self.peer_pseudonym}] (第{global_epoch}轮):')
+                    print(f'   攻击类型: 简单标签翻转')
+                    print(f'   攻击模式: 固定映射')
+                    print(f'   映射关系: [{source_class}→{target_class}]')
+                    print(f'   累计攻击次数: {self.performed_attacks + 1}')
+                    
+                # 训练完成后显示具体的翻转记录
+                # 这里先创建一个临时的loader来触发翻转记录
+                if hasattr(poisoned_data, 'current_round_flips') and global_epoch == 0:
+                    # 快速采样一小部分数据来生成翻转记录用于显示
+                    sample_size = min(50, len(poisoned_data))
+                    for i in range(sample_size):
+                        _ = poisoned_data[i]  # 触发__getitem__记录翻转
+                    
+                    flips = poisoned_data.get_current_round_flips()
+                    if flips:
+                        # 统计翻转情况
+                        flip_summary = {}
+                        for flip in flips:
+                            key = f"{flip['original']}→{flip['flipped']}"
+                            flip_summary[key] = flip_summary.get(key, 0) + 1
+                        
+                        print(f'   实际翻转记录:')
+                        for flip_pattern, count in flip_summary.items():
+                            print(f'   • {flip_pattern}: {count}次')
         lr=self.local_lr
 
         if dataset_name == 'IMDB':
@@ -148,6 +253,27 @@ class Peer():
                 self.performed_attacks+=1
                 attacked = 1
             model.load_state_dict(update)
+
+        # 在训练结束后显示实际翻转记录（仅在第一轮显示且存在标签翻转攻击时）
+        if (attack_type == 'label_flipping' and self.peer_type == 'attacker' and 
+            attacked == 1 and global_epoch == 0 and 'poisoned_data' in locals()):
+            try:
+                if hasattr(poisoned_data, 'get_current_round_flips'):
+                    all_flips = poisoned_data.get_current_round_flips()
+                    if all_flips:
+                        # 统计翻转情况
+                        flip_summary = {}
+                        for flip in all_flips:
+                            key = f"{flip['original']}→{flip['flipped']}"
+                            flip_summary[key] = flip_summary.get(key, 0) + 1
+                        
+                        print(f'✅ [{self.peer_pseudonym}] 训练完成后实际翻转统计:')
+                        for flip_pattern, count in flip_summary.items():
+                            print(f'   • {flip_pattern}: {count}次')
+                        print(f'   总翻转数: {len(all_flips)}')
+            except Exception as e:
+                # 静默处理错误，不影响主流程
+                pass
 
         model = model.cpu()
         return model.state_dict(), peer_grad , model, np.mean(epoch_loss), attacked, t, local_features
@@ -348,7 +474,8 @@ class FL:
 
         
     def run_experiment(self, attack_type = 'no_attack', malicious_behavior_rate = 0,
-        source_class = None, target_class = None, rule = 'fedavg', resume = False, log_file="experiment.log"):
+        source_class = None, target_class = None, rule = 'fedavg', resume = False, log_file="experiment.log",
+        attack_config = None):
         # 时间戳已移除，使用固定命名方式
         # timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         
@@ -358,13 +485,21 @@ class FL:
                             level=logging.INFO)
         simulation_model = copy.deepcopy(self.global_model)
         print('\n===>Simulation started...')
-        lfd = LFD(self.num_classes)
+        lfd = LFD(self.num_classes, attack_ratio=self.attackers_ratio)
         fg = FoolsGold(self.num_peers)
         tolpegin = Tolpegin()
         lfighter_dbo = LFighterDBO()
         lfighter_mv = LFighterMV()
         lfighter_mv_dbo = LFighterMVDBO()
-        lfighter_ae = LFighterAutoencoder(self.num_classes)
+        lfighter_ae = LFighterAutoencoder(
+            self.num_classes, 
+            enable_visualization=True,
+            save_path="./figures/",
+            attack_ratio=self.attackers_ratio
+        )
+        # 设置总轮数用于PDF可视化控制
+        if rule == 'lfighter_ae':
+            lfighter_ae.set_total_rounds(self.global_rounds)
         # copy weights
         global_weights = simulation_model.state_dict()
         last10_updates = []
@@ -413,7 +548,8 @@ class FL:
                 peer_update, peer_grad, peer_local_model, peer_loss, attacked, t, peer_features = self.peers[peer].participant_update(epoch, 
                 copy.deepcopy(simulation_model),
                 attack_type = attack_type, malicious_behavior_rate = malicious_behavior_rate, 
-                source_class = source_class, target_class = target_class, dataset_name = self.dataset_name, rule = rule)
+                source_class = source_class, target_class = target_class, dataset_name = self.dataset_name, rule = rule,
+                attack_config = attack_config)
                 local_weights.append(peer_update)
                 local_grads.append(peer_grad)
                 local_losses.append(peer_loss) 
@@ -550,14 +686,53 @@ class FL:
             
             current_asr = 0.0  # 当前轮次的ASR
             current_source_acc = 0.0  # 当前轮次的源类别准确率
-            for i, r in enumerate(cm):
-                if i == source_class:
-                    current_source_acc = np.round(r[i]/np.sum(r)*100, 2) if np.sum(r) > 0 else 0.0
-                    source_class_accuracies.append(current_source_acc)
-                    # 计算ASR
-                    if np.sum(r) > 0:
-                        current_asr = np.round(r[target_class]/np.sum(r)*100, 2)
-                    break
+            
+            # 检查是否是移位攻击（使用MULTI_TARGET_ATTACK配置）
+            is_shift_attack = False
+            attack_mappings = {}
+            if attack_config and attack_config.get('type') == 'multi_target':
+                is_shift_attack = True
+                attack_mappings = attack_config.get('mappings', {})
+                
+            if is_shift_attack:
+                # 移位攻击的ASR计算：所有映射类别的平均ASR
+                total_source_samples = 0
+                total_successful_attacks = 0
+                
+                for src_class, tgt_class in attack_mappings.items():
+                    if src_class < len(cm) and np.sum(cm[src_class]) > 0:
+                        # 源类别样本中被预测为目标类别的比例
+                        source_samples = np.sum(cm[src_class])
+                        successful_attacks = cm[src_class][tgt_class]
+                        total_source_samples += source_samples
+                        total_successful_attacks += successful_attacks
+                        
+                        # 如果是源类别，记录其准确率（用于兼容现有代码）
+                        if src_class == source_class:
+                            current_source_acc = np.round(cm[src_class][src_class]/source_samples*100, 2)
+                            source_class_accuracies.append(current_source_acc)
+                
+                # 计算全局ASR
+                if total_source_samples > 0:
+                    current_asr = np.round(total_successful_attacks/total_source_samples*100, 2)
+                    print(f"[移位攻击ASR] 总源样本: {total_source_samples}, 成功攻击: {total_successful_attacks}, ASR: {current_asr:.2f}%")
+                    
+                    # 显示每个类别的详细ASR
+                    print("\n各类别ASR详情:")
+                    for src_class, tgt_class in attack_mappings.items():
+                        if src_class < len(cm) and np.sum(cm[src_class]) > 0:
+                            class_asr = np.round(cm[src_class][tgt_class]/np.sum(cm[src_class])*100, 2)
+                            print(f"[轮次{epoch+1} ASR] 源类别{src_class}({self.labels_dict.get(src_class, '未知')})→目标类别{tgt_class}({self.labels_dict.get(tgt_class, '未知')}): {class_asr:.2f}%")
+            else:
+                # 传统单一源-目标攻击的ASR计算
+                for i, r in enumerate(cm):
+                    if i == source_class:
+                        current_source_acc = np.round(r[i]/np.sum(r)*100, 2) if np.sum(r) > 0 else 0.0
+                        source_class_accuracies.append(current_source_acc)
+                        # 计算ASR
+                        if np.sum(r) > 0:
+                            current_asr = np.round(r[target_class]/np.sum(r)*100, 2)
+                        break
             
             global_accuracies.append(np.round(current_accuracy, 2))
             test_losses.append(np.round(test_loss, 4))
@@ -671,23 +846,71 @@ class FL:
                 print('-' * 60)
                 correct_predictions = 0
                 asr = 0.0  # 初始化ASR
-                for i, r in enumerate(cm):
-                    class_accuracy = r[i]/np.sum(r)*100 if np.sum(r) > 0 else 0
-                    correct_predictions += r[i]
-                    print('{:25} - {:6.1f}% - {:6d} - {:6d}'.format(
-                        self.labels_dict[classes[i]], 
-                        class_accuracy,
-                        r[i], 
-                        np.sum(r)
-                    ))
-                    if i == source_class:
-                        source_class_accuracies.append(np.round(class_accuracy, 2))
-                        # 修正ASR计算：源类别样本中被预测为目标类别的比例
-                        if np.sum(r) > 0:
-                            asr = np.round(r[target_class]/np.sum(r)*100, 2)
-                        else:
-                            asr = 0.0
-                        print(f"[ASR计算] 源类别{source_class}总样本: {np.sum(r)}, 被预测为目标类别{target_class}: {r[target_class]}, ASR: {asr:.2f}%")
+                
+                # 检查是否是移位攻击（使用MULTI_TARGET_ATTACK配置）
+                is_shift_attack = False
+                attack_mappings = {}
+                if attack_config and attack_config.get('type') == 'multi_target':
+                    is_shift_attack = True
+                    attack_mappings = attack_config.get('mappings', {})
+                
+                if is_shift_attack:
+                    # 移位攻击的最终ASR计算
+                    total_source_samples = 0
+                    total_successful_attacks = 0
+                    
+                    for i, r in enumerate(cm):
+                        class_accuracy = r[i]/np.sum(r)*100 if np.sum(r) > 0 else 0
+                        correct_predictions += r[i]
+                        print('{:25} - {:6.1f}% - {:6d} - {:6d}'.format(
+                            self.labels_dict[classes[i]], 
+                            class_accuracy,
+                            r[i], 
+                            np.sum(r)
+                        ))
+                        
+                        # 如果当前类是攻击映射中的源类别
+                        if i in attack_mappings:
+                            tgt_class = attack_mappings[i]
+                            source_samples = np.sum(r)
+                            successful_attacks = r[tgt_class]
+                            total_source_samples += source_samples
+                            total_successful_attacks += successful_attacks
+                            
+                            # 如果是主要源类别，记录其准确率
+                            if i == source_class:
+                                source_class_accuracies.append(np.round(class_accuracy, 2))
+                                
+                    # 计算全局ASR
+                    if total_source_samples > 0:
+                        asr = np.round(total_successful_attacks/total_source_samples*100, 2)
+                    print(f"\n[最终移位攻击ASR] 总源样本: {total_source_samples}, 成功攻击: {total_successful_attacks}, ASR: {asr:.2f}%")
+                    
+                    # 显示每个类别的详细ASR
+                    print("\n各类别ASR详情:")
+                    for src_class, tgt_class in attack_mappings.items():
+                        if src_class < len(cm) and np.sum(cm[src_class]) > 0:
+                            class_asr = np.round(cm[src_class][tgt_class]/np.sum(cm[src_class])*100, 2)
+                            print(f"[最终ASR] 源类别{src_class}({self.labels_dict.get(src_class, '未知')})→目标类别{tgt_class}({self.labels_dict.get(tgt_class, '未知')}): {class_asr:.2f}%")
+                else:
+                    # 传统单一源-目标攻击的ASR计算
+                    for i, r in enumerate(cm):
+                        class_accuracy = r[i]/np.sum(r)*100 if np.sum(r) > 0 else 0
+                        correct_predictions += r[i]
+                        print('{:25} - {:6.1f}% - {:6d} - {:6d}'.format(
+                            self.labels_dict[classes[i]], 
+                            class_accuracy,
+                            r[i], 
+                            np.sum(r)
+                        ))
+                        if i == source_class:
+                            source_class_accuracies.append(np.round(class_accuracy, 2))
+                            # 修正ASR计算：源类别样本中被预测为目标类别的比例
+                            if np.sum(r) > 0:
+                                asr = np.round(r[target_class]/np.sum(r)*100, 2)
+                            else:
+                                asr = 0.0
+                            print(f"[ASR计算] 源类别{source_class}总样本: {np.sum(r)}, 被预测为目标类别{target_class}: {r[target_class]}, ASR: {asr:.2f}%")
                 
                 # 验证全局准确率计算
                 manual_global_acc = correct_predictions / total_samples * 100
@@ -718,6 +941,12 @@ class FL:
         print('Test loss:', test_losses)
         print('Attack succes rate:', asr)
         print('Average CPU aggregation runtime:', np.mean(cpu_runtimes))
+        
+        # 关闭PDF文件
+        if rule == 'lfighter':
+            lfd.finalize_pdf()
+        elif rule == 'lfighter_ae':
+            lfighter_ae.finalize_pdf()
         
         # 返回最终结果给调用者
         final_accuracy = global_accuracies[-1] if global_accuracies else 0.0

@@ -16,6 +16,21 @@ from utils import *
 from sklearn.preprocessing import StandardScaler
 import torch.nn as nn
 import torch.optim as optim
+# 添加可视化相关导入
+import matplotlib
+matplotlib.use('Agg')  # 设置后端，支持无GUI环境
+import matplotlib.pyplot as plt
+import seaborn as sns
+from sklearn.manifold import TSNE
+import os
+from matplotlib.backends.backend_pdf import PdfPages
+
+# 设置matplotlib和seaborn样式
+plt.style.use('default')
+sns.set_palette("husl")
+plt.rcParams['font.size'] = 10
+plt.rcParams['figure.dpi'] = 300
+plt.rcParams['savefig.bbox'] = 'tight'
 
 def get_pca(data, threshold = 0.99):
     normalized_data = StandardScaler().fit_transform(data)
@@ -32,24 +47,515 @@ def get_pca(data, threshold = 0.99):
 eps = np.finfo(float).eps
 
 class LFD():
-    def __init__(self, num_classes):
-        self.memory = np.zeros([num_classes])
+    def __init__(self, num_classes, enable_visualization=True, save_path="./figures/", 
+                 visualization_frequency=1, max_visualizations=0, save_final_only=False,
+                 save_as_pdf=True, keep_individual_files=False, attack_ratio=None):
+        """
+        Args:
+            save_as_pdf: 是否保存为PDF格式（默认True）
+            keep_individual_files: 是否保留单独的PNG文件（默认False）
+            attack_ratio: 攻击者比率，用于PDF文件名
+        """
+        self.num_classes = num_classes
+        self.memory = np.zeros(num_classes)
+        
+        # 可视化相关参数
+        self.enable_visualization = enable_visualization
+        self.save_path = save_path
+        self.visualization_frequency = visualization_frequency
+        self.max_visualizations = max_visualizations
+        self.save_final_only = save_final_only
+        self.save_as_pdf = save_as_pdf
+        self.keep_individual_files = keep_individual_files
+        self.attack_ratio = attack_ratio
+        
+        # 轮数计数器
+        self.round_counter = 0
+        self.total_rounds = None
+        self.visualization_count = 0
+        
+        # PDF文件管理
+        self.pdf_pages = None
+        self.pdf_filename = None
+        
+        # 确保保存目录存在
+        if self.enable_visualization:
+            os.makedirs(self.save_path, exist_ok=True)
+            
+            # 创建PDF文件（如果启用PDF保存）
+            if self.save_as_pdf:
+                self._initialize_pdf()
+    
+    def _initialize_pdf(self):
+        """初始化PDF文件"""
+        try:
+            from matplotlib.backends.backend_pdf import PdfPages
+            attack_str = f"_atr{self.attack_ratio:.1f}" if self.attack_ratio is not None else ""
+            self.pdf_filename = f'{self.save_path}/lfighter_complete_report{attack_str}.pdf'
+            self.pdf_pages = PdfPages(self.pdf_filename)
+            print(f"[LFighter] 🔗 PDF报告初始化成功")
+            print(f"[LFighter] 📄 实时查看路径: {self.pdf_filename}")
+            print(f"[LFighter] 💡 提示: 每个epoch后PDF会自动更新，可随时查看")
+        except Exception as e:
+            print(f"[LFighter] PDF初始化失败: {e}")
+            self.pdf_pages = None
+    
+    def finalize_pdf(self):
+        """关闭PDF文件"""
+        if self.pdf_pages is not None:
+            try:
+                self.pdf_pages.close()
+                print(f"[LFighter] PDF报告已保存: {self.pdf_filename}")
+            except Exception as e:
+                print(f"[LFighter] PDF关闭失败: {e}")
+            finally:
+                self.pdf_pages = None
+    
+    def set_total_rounds(self, total_rounds):
+        """设置总训练轮数，用于save_final_only模式"""
+        self.total_rounds = total_rounds
+        if self.enable_visualization:
+            print(f"[LFighter] Set total rounds to {total_rounds} for visualization control")
+    
+    def should_visualize_this_round(self):
+        """判断当前轮次是否应该保存可视化"""
+        if not self.enable_visualization:
+            return False
+            
+        # 如果设置为只保存最后一轮
+        if self.save_final_only:
+            return self.total_rounds is not None and self.round_counter == self.total_rounds
+        
+        # 动态调整可视化频率：前20轮每轮可视化，后续每10轮一次
+        if self.round_counter <= 20:
+            current_frequency = 1
+        else:
+            current_frequency = 10
+        
+        # 按动态频率保存
+        return self.round_counter % current_frequency == 0
+    
+    def cleanup_old_visualizations(self):
+        """清理旧的可视化文件"""
+        if not self.enable_visualization:
+            return
+        
+        if self.max_visualizations > 0 and self.visualization_count > self.max_visualizations:
+            # 清理PNG文件
+            png_files = [f for f in os.listdir(self.save_path) if f.startswith('lfighter_') and f.endswith('.png')]
+            png_files.sort(key=lambda x: os.path.getctime(os.path.join(self.save_path, x)))
+            
+            while len(png_files) > self.max_visualizations:
+                old_file = os.path.join(self.save_path, png_files.pop(0))
+                if os.path.exists(old_file):
+                    os.remove(old_file)
+            
+            # 清理文本文件
+            txt_files = [f for f in os.listdir(self.save_path) if f.startswith('lfighter_') and f.endswith('.txt')]
+            txt_files.sort(key=lambda x: os.path.getctime(os.path.join(self.save_path, x)))
+            
+            while len(txt_files) > self.max_visualizations:
+                old_file = os.path.join(self.save_path, txt_files.pop(0))
+                if os.path.exists(old_file):
+                    os.remove(old_file)
+    
+    def create_pdf_report(self, round_num, features, labels, ptypes, scores, cs0, cs1, good_cl, metrics):
+        """向已有PDF文件添加当前轮次的可视化页面"""
+        if not self.should_visualize_this_round() or not self.save_as_pdf or self.pdf_pages is None:
+            return
+        
+        try:
+            # 第一页：特征空间可视化
+            fig, axes = plt.subplots(1, 2, figsize=(16, 8))
+            
+            # t-SNE降维
+            if features.shape[1] > 2:
+                try:
+                    perplexity = min(30, len(features)-1)
+                    if perplexity < 1:
+                        perplexity = 1
+                    tsne = TSNE(n_components=2, random_state=42, perplexity=perplexity)
+                    features_2d = tsne.fit_transform(features)
+                except:
+                    from sklearn.decomposition import PCA
+                    pca = PCA(n_components=2, random_state=42)
+                    features_2d = pca.fit_transform(features)
+            else:
+                features_2d = features
+            
+            # 按客户端类型着色
+            colors = []
+            malicious_count = 0
+            for ptype in ptypes:
+                ptype_str = str(ptype).lower()
+                if ('malicious' in ptype_str or 'attack' in ptype_str or 
+                    'bad' in ptype_str or 'adversarial' in ptype_str):
+                    colors.append('red')
+                    malicious_count += 1
+                else:
+                    colors.append('blue')
+            
+            axes[0].scatter(features_2d[:, 0], features_2d[:, 1], c=colors, alpha=0.7, s=100)
+            axes[0].set_title('LFighter: Feature Space (by Client Type)', fontsize=14)
+            axes[0].set_xlabel('Dimension 1')
+            axes[0].set_ylabel('Dimension 2')
+            
+            red_patch = plt.matplotlib.patches.Patch(color='red', label='Malicious')
+            blue_patch = plt.matplotlib.patches.Patch(color='blue', label='Benign')
+            axes[0].legend(handles=[red_patch, blue_patch])
+            
+            # 按聚类结果着色
+            cluster_colors = ['orange', 'green']
+            for i in range(len(features_2d)):
+                axes[1].scatter(features_2d[i, 0], features_2d[i, 1], 
+                               c=cluster_colors[labels[i]], alpha=0.7, s=100)
+            axes[1].set_title('LFighter: Feature Space (by Cluster)', fontsize=14)
+            axes[1].set_xlabel('Dimension 1')
+            axes[1].set_ylabel('Dimension 2')
+            
+            orange_patch = plt.matplotlib.patches.Patch(color='orange', label='Cluster 0')
+            green_patch = plt.matplotlib.patches.Patch(color='green', label='Cluster 1')
+            axes[1].legend(handles=[orange_patch, green_patch])
+            
+            plt.suptitle(f'LFighter Algorithm - Round {round_num} - Feature Space Analysis', fontsize=16)
+            plt.tight_layout()
+            self.pdf_pages.savefig(fig, bbox_inches='tight')
+            plt.close()
+            
+            # 第二页：聚类质量和客户端得分
+            fig, axes = plt.subplots(2, 2, figsize=(16, 12))
+            
+            # 聚类质量
+            clusters = ['Cluster 0', 'Cluster 1']
+            dissimilarities = [cs0, cs1]
+            cluster_quality_colors = ['green' if i == good_cl else 'red' for i in range(2)]
+            
+            bars = axes[0, 0].bar(clusters, dissimilarities, color=cluster_quality_colors, alpha=0.7)
+            axes[0, 0].set_ylabel('Dissimilarity Score')
+            axes[0, 0].set_title('Cluster Quality Comparison')
+            axes[0, 0].grid(True, alpha=0.3)
+            
+            for i, (bar, score) in enumerate(zip(bars, dissimilarities)):
+                axes[0, 0].text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.01,
+                              f'{score:.4f}', ha='center', va='bottom')
+            
+            axes[0, 0].text(good_cl, dissimilarities[good_cl] + 0.05, '✓ Good Cluster', 
+                           ha='center', va='bottom', fontsize=12, fontweight='bold')
+            
+            # 客户端得分条形图
+            client_indices = range(len(scores))
+            bars = axes[0, 1].bar(client_indices, scores, color=colors, alpha=0.7)
+            axes[0, 1].set_title('Client Scores')
+            axes[0, 1].set_xlabel('Client Index')
+            axes[0, 1].set_ylabel('Score')
+            axes[0, 1].set_ylim(0, 1.1)
+            axes[0, 1].grid(True, alpha=0.3)
+            
+            # 得分分布直方图
+            axes[1, 0].hist(scores, bins=10, alpha=0.7, color='skyblue', edgecolor='black')
+            axes[1, 0].axvline(np.mean(scores), color='red', linestyle='--', 
+                              label=f'Mean: {np.mean(scores):.4f}')
+            axes[1, 0].axvline(np.median(scores), color='orange', linestyle='--', 
+                              label=f'Median: {np.median(scores):.4f}')
+            axes[1, 0].set_xlabel('Score')
+            axes[1, 0].set_ylabel('Frequency')
+            axes[1, 0].set_title('Score Distribution')
+            axes[1, 0].legend()
+            axes[1, 0].grid(True, alpha=0.3)
+            
+            # 性能指标文本
+            axes[1, 1].axis('off')
+            attack_ratio_str = f"Attack Ratio: {self.attack_ratio:.1f}" if self.attack_ratio is not None else "Attack Ratio: N/A"
+            metrics_text = f"""
+Performance Metrics - Round {round_num}
+
+{attack_ratio_str}
+Total Clients: {metrics.get('total_clients', 'N/A')}
+Good Clients Selected: {metrics.get('good_clients', 'N/A')}
+Selection Accuracy: {metrics.get('accuracy', 'N/A'):.2%}
+
+Cluster Analysis:
+• Cluster 0 Dissimilarity: {metrics.get('cs0', 'N/A'):.4f}
+• Cluster 1 Dissimilarity: {metrics.get('cs1', 'N/A'):.4f}
+• Good Cluster: {metrics.get('good_cluster', 'N/A')}
+
+Feature Processing:
+• Reduction Method: {metrics.get('reduction_method', 'N/A')}
+• Detected Anomalous Classes: {metrics.get('anomalous_classes', 'N/A')}
+
+Algorithm: Original LFighter (K-means clustering)
+Timestamp: {time.strftime('%Y-%m-%d %H:%M:%S')}
+"""
+            axes[1, 1].text(0.05, 0.95, metrics_text, transform=axes[1, 1].transAxes, 
+                           fontsize=10, verticalalignment='top', fontfamily='monospace')
+            
+            plt.suptitle(f'LFighter Algorithm - Round {round_num} - Performance Analysis', fontsize=16)
+            plt.tight_layout()
+            self.pdf_pages.savefig(fig, bbox_inches='tight')
+            plt.close()
+            
+            # 强制刷新PDF文件，确保实时可见
+            try:
+                # matplotlib PdfPages 的正确flush方法
+                if hasattr(self.pdf_pages, '_file') and hasattr(self.pdf_pages._file, '_file'):
+                    self.pdf_pages._file._file.flush()
+                    import os
+                    os.fsync(self.pdf_pages._file._file.fileno())
+                elif hasattr(self.pdf_pages, 'flush'):
+                    self.pdf_pages.flush()
+            except:
+                pass  # 忽略flush错误，不影响正常功能
+            
+            print(f"[LFighter] Round {round_num} 添加到PDF报告 - 实时可查看: {self.pdf_filename}")
+            
+        except Exception as e:
+            print(f"[LFighter] PDF页面添加失败 Round {round_num}: {e}")
+    
+    def visualize_feature_space(self, features, labels, ptypes, round_num):
+        """可视化原始特征空间"""
+        if not self.should_visualize_this_round():
+            return
+        
+        # 调试信息：打印客户端类型
+        if self.enable_visualization and round_num == 1:  # 只在第一轮打印
+            print(f"[LFighter Debug] Client types: {ptypes[:10]}...")  # 打印前10个客户端类型
+        
+        fig, axes = plt.subplots(1, 2, figsize=(16, 6))
+        
+        # t-SNE降维可视化
+        if features.shape[1] > 2:
+            try:
+                perplexity = min(30, len(features)-1)
+                if perplexity < 1:
+                    perplexity = 1
+                tsne = TSNE(n_components=2, random_state=42, perplexity=perplexity)
+                features_2d = tsne.fit_transform(features)
+            except:
+                # 如果t-SNE失败，使用PCA
+                from sklearn.decomposition import PCA
+                pca = PCA(n_components=2, random_state=42)
+                features_2d = pca.fit_transform(features)
+        else:
+            features_2d = features
+        
+        # 1. 按客户端类型着色 - 增强检测逻辑
+        colors = []
+        malicious_count = 0
+        for ptype in ptypes:
+            ptype_str = str(ptype).lower()
+            if ('malicious' in ptype_str or 'attack' in ptype_str or 
+                'bad' in ptype_str or 'adversarial' in ptype_str):
+                colors.append('red')
+                malicious_count += 1
+            else:
+                colors.append('blue')
+        
+        # 调试信息：打印检测结果
+        if self.enable_visualization and round_num == 1:
+            print(f"[LFighter Debug] Detected {malicious_count}/{len(ptypes)} malicious clients")
+        
+        axes[0].scatter(features_2d[:, 0], features_2d[:, 1], c=colors, alpha=0.7, s=100)
+        axes[0].set_title('LFighter: Feature Space (by Client Type)')
+        axes[0].set_xlabel('Dimension 1')
+        axes[0].set_ylabel('Dimension 2')
+        
+        # 添加图例
+        red_patch = plt.matplotlib.patches.Patch(color='red', label='Malicious')
+        blue_patch = plt.matplotlib.patches.Patch(color='blue', label='Benign')
+        axes[0].legend(handles=[red_patch, blue_patch])
+        
+        # 2. 按聚类结果着色
+        cluster_colors = ['orange', 'green']
+        for i in range(len(features_2d)):
+            axes[1].scatter(features_2d[i, 0], features_2d[i, 1], 
+                           c=cluster_colors[labels[i]], alpha=0.7, s=100)
+        axes[1].set_title('LFighter: Feature Space (by Cluster)')
+        axes[1].set_xlabel('Dimension 1')
+        axes[1].set_ylabel('Dimension 2')
+        
+        # 添加聚类图例
+        orange_patch = plt.matplotlib.patches.Patch(color='orange', label='Cluster 0')
+        green_patch = plt.matplotlib.patches.Patch(color='green', label='Cluster 1')
+        axes[1].legend(handles=[orange_patch, green_patch])
+        
+        plt.tight_layout()
+        plt.savefig(f'{self.save_path}/lfighter_feature_space_round_{round_num}.png', dpi=300, bbox_inches='tight')
+        plt.close()
+    
+    def visualize_cluster_quality(self, cs0, cs1, good_cl, round_num):
+        """可视化聚类质量"""
+        if not self.should_visualize_this_round():
+            return
+            
+        # 只在PDF报告中添加聚类质量可视化，不生成单独的图片文件
+        if self.save_as_pdf and self.pdf_pages is not None:
+            plt.figure(figsize=(10, 6))
+            clusters = ['Cluster 0', 'Cluster 1']
+            dissimilarities = [cs0, cs1]
+            colors = ['green' if i == good_cl else 'red' for i in range(2)]
+            
+            plt.bar(clusters, dissimilarities, color=colors, alpha=0.7)
+            plt.ylabel('Dissimilarity Score')
+            plt.title('Cluster Quality Comparison')
+            plt.grid(True, alpha=0.3)
+            
+            # 添加图例
+            green_patch = plt.matplotlib.patches.Patch(color='green', label='Good Cluster')
+            red_patch = plt.matplotlib.patches.Patch(color='red', label='Bad Cluster')
+            plt.legend(handles=[green_patch, red_patch])
+            
+            try:
+                self.pdf_pages.savefig(plt.gcf(), bbox_inches='tight')
+            except Exception as e:
+                print(f"[LFighter-AE] 聚类质量可视化添加到PDF失败: {e}")
+            plt.close()
+    
+    def visualize_client_scores(self, scores, ptypes, round_num):
+        """可视化客户端得分"""
+        if not self.should_visualize_this_round():
+            return
+        
+        fig, axes = plt.subplots(1, 2, figsize=(16, 6))
+        
+        client_indices = range(len(scores))
+        
+        # 增强的客户端类型检测逻辑
+        colors = []
+        malicious_count = 0
+        for ptype in ptypes:
+            ptype_str = str(ptype).lower()
+            if ('malicious' in ptype_str or 'attack' in ptype_str or 
+                'bad' in ptype_str or 'adversarial' in ptype_str):
+                colors.append('red')
+                malicious_count += 1
+            else:
+                colors.append('blue')
+        
+        # 调试信息：打印检测结果
+        if self.enable_visualization and round_num == 1:
+            print(f"[LFighter Client Scores] Detected {malicious_count}/{len(ptypes)} malicious clients")
+        
+        # 1. 客户端得分条形图
+        bars = axes[0].bar(client_indices, scores, color=colors, alpha=0.7)
+        axes[0].set_title('LFighter: Client Scores')
+        axes[0].set_xlabel('Client Index')
+        axes[0, 1].set_ylim(0, 1.1)
+        axes[0].grid(True, alpha=0.3)
+        
+        # 添加图例
+        red_patch = plt.matplotlib.patches.Patch(color='red', label='Malicious')
+        blue_patch = plt.matplotlib.patches.Patch(color='blue', label='Benign')
+        axes[0].legend(handles=[red_patch, blue_patch])
+        
+        # 2. 得分分布直方图
+        axes[1].hist(scores, bins=10, alpha=0.7, color='skyblue', edgecolor='black')
+        axes[1].axvline(np.mean(scores), color='red', linestyle='--', 
+                       label=f'Mean: {np.mean(scores):.4f}')
+        axes[1].axvline(np.median(scores), color='orange', linestyle='--', 
+                       label=f'Median: {np.median(scores):.4f}')
+        axes[1].set_xlabel('Score')
+        axes[1].set_ylabel('Frequency')
+        axes[1].set_title('LFighter: Score Distribution')
+        axes[1].legend()
+        axes[1].grid(True, alpha=0.3)
+        
+        plt.tight_layout()
+        plt.savefig(f'{self.save_path}/lfighter_client_scores_round_{round_num}.png', dpi=300, bbox_inches='tight')
+        plt.close()
+    
+    def create_summary_report(self, round_num, metrics):
+        """创建总结报告"""
+        if not self.should_visualize_this_round():
+            return
+        
+        # 只在PDF报告中添加总结报告，不生成单独的文本文件
+        if self.save_as_pdf and self.pdf_pages is not None:
+            # 创建文本报告
+            report_content = f"""
+LFighter-Autoencoder Algorithm Summary Report
+==========================================
+Round: {round_num}
+Timestamp: {time.strftime('%Y-%m-%d %H:%M:%S')}
+
+Algorithm Parameters:
+- Hidden Dimension: {self.ae_hidden_dim}
+- Latent Dimension: {self.ae_latent_dim}
+- Training Epochs: {self.ae_epochs}
+- Reconstruction Weight: {self.reconstruction_weight}
+
+Performance Metrics:
+- Total Clients: {metrics.get('total_clients', 'N/A')}
+- Good Clients Selected: {metrics.get('good_clients', 'N/A')}
+- Selection Accuracy: {metrics.get('accuracy', 'N/A'):.2%}
+- Cluster 0 Dissimilarity: {metrics.get('cs0', 'N/A'):.4f}
+- Cluster 1 Dissimilarity: {metrics.get('cs1', 'N/A'):.4f}
+- Good Cluster: {metrics.get('good_cluster', 'N/A')}
+- Mean Reconstruction Error: {metrics.get('mean_recon_error', 'N/A'):.4f}
+- Std Reconstruction Error: {metrics.get('std_recon_error', 'N/A'):.4f}
+
+Feature Processing:
+- Feature Strategy: {metrics.get('feature_strategy', '使用全部输出层梯度')}
+- Original Feature Dimension: {metrics.get('feature_dim', 'N/A')}
+- Dimension Reduction Method: {metrics.get('reduction_method', 'N/A')}
+- Final Loss: {metrics.get('final_loss', 'N/A'):.6f}
+
+Attack Analysis:
+- Attack Type: {metrics.get('attack_type', 'N/A')}
+- Attack Scope: {metrics.get('attack_scope', 'N/A')}
+- Attack Description: {metrics.get('attack_description', 'N/A')}
+- Confidence: {metrics.get('attack_confidence', 'N/A'):.2f}
+"""
+            
+            # 创建一个文本图像，添加到PDF
+            fig = plt.figure(figsize=(12, 10))
+            plt.text(0.1, 0.5, report_content, fontsize=10, family='monospace')
+            plt.axis('off')
+            
+            try:
+                self.pdf_pages.savefig(fig, bbox_inches='tight')
+            except Exception as e:
+                print(f"[LFighter-AE] 总结报告添加到PDF失败: {e}")
+            plt.close()
     
     def clusters_dissimilarity(self, clusters):
+        """计算聚类间相异性，处理空聚类情况"""
         n0 = len(clusters[0])
         n1 = len(clusters[1])
         m = n0 + n1 
-        cs0 = smp.cosine_similarity(clusters[0]) - np.eye(n0)
-        cs1 = smp.cosine_similarity(clusters[1]) - np.eye(n1)
-        mincs0 = np.min(cs0, axis=1)
-        mincs1 = np.min(cs1, axis=1)
-        ds0 = n0/m * (1 - np.mean(mincs0))
-        ds1 = n1/m * (1 - np.mean(mincs1))
+        
+        # 处理空聚类情况
+        if n0 == 0:
+            return 1.0, 0.0  # 空聚类0，聚类1更好
+        if n1 == 0:
+            return 0.0, 1.0  # 空聚类1，聚类0更好
+        if n0 == 1:
+            ds0 = 1.0  # 单样本聚类质量设为最差
+        else:
+            cs0 = smp.cosine_similarity(clusters[0]) - np.eye(n0)
+            mincs0 = np.min(cs0, axis=1)
+            ds0 = n0/m * (1 - np.mean(mincs0))
+        
+        if n1 == 1:
+            ds1 = 1.0  # 单样本聚类质量设为最差
+        else:
+            cs1 = smp.cosine_similarity(clusters[1]) - np.eye(n1)
+            mincs1 = np.min(cs1, axis=1)
+            ds1 = n1/m * (1 - np.mean(mincs1))
+        
         return ds0, ds1
 
     def aggregate(self, global_model, local_models, ptypes):
         local_weights = [copy.deepcopy(model).state_dict() for model in local_models]
         m = len(local_models)
+        
+        # 可视化模式下增加轮数计数
+        if self.enable_visualization:
+            self.round_counter += 1
+            # 提示当前可视化频率
+            current_freq = 1 if self.round_counter <= 20 else 10
+            next_viz_round = self.round_counter if self.round_counter % current_freq == 0 else ((self.round_counter // current_freq) + 1) * current_freq
+            print(f"[LFighter] Round {self.round_counter} - Visualization freq: every {current_freq} rounds (next: round {next_viz_round})")
+        
         for i in range(m):
             local_models[i] = list(local_models[i].parameters())
         global_model = list(global_model.parameters())
@@ -81,14 +587,41 @@ class LFD():
             if cs0 < cs1:
                 good_cl = 1
 
-            # print('Cluster 0 weighted variance', cs0)
-            # print('Cluster 1 weighted variance', cs1)
-            # print('Potential good cluster is:', good_cl)
             scores = np.ones([m])
             for i, l in enumerate(labels):
-                # print(ptypes[i], 'Cluster:', l)
                 if l != good_cl:
                     scores[i] = 0
+            
+            # 可视化结果
+            if self.enable_visualization:
+                print(f'[LFighter] Cluster quality: cs0={cs0:.4f}, cs1={cs1:.4f}, good_cluster={good_cl}')
+                print(f'[LFighter] Selected good clients: {np.sum(scores)}/{m}')
+                
+                if self.should_visualize_this_round():
+                    # 创建总结报告
+                    metrics = {
+                        'total_clients': m,
+                        'good_clients': int(np.sum(scores)),
+                        'accuracy': int(np.sum(scores)) / m,
+                        'cs0': cs0,
+                        'cs1': cs1,
+                        'good_cluster': good_cl,
+                        'reduction_method': 'Binary classification',
+                        'anomalous_classes': 'N/A (Binary)'
+                    }
+                    
+                    # 生成PDF报告（如果启用）
+                    self.create_pdf_report(self.round_counter, np.array(data), labels, ptypes, scores, cs0, cs1, good_cl, metrics)
+                    
+                    # 生成单独的PNG文件（如果需要）
+                    if self.keep_individual_files:
+                        self.visualize_feature_space(np.array(data), labels, ptypes, self.round_counter)
+                        self.visualize_cluster_quality(cs0, cs1, good_cl, self.round_counter)
+                        self.visualize_client_scores(scores, ptypes, self.round_counter)
+                        self.create_summary_report(self.round_counter, metrics)
+                    
+                    # 清理旧的可视化文件
+                    self.cleanup_old_visualizations()
                 
             global_weights = average_weights(local_weights, scores)
             return global_weights
@@ -149,17 +682,45 @@ class LFD():
         if cs0 < cs1:
             good_cl = 1
 
-        # print('Cluster 0 weighted variance', cs0)
-        # print('Cluster 1 weighted variance', cs1)
-        # print('Potential good cluster is:', good_cl)
         scores = np.ones([m])
         for i, l in enumerate(labels):
-            # print(ptypes[i], 'Cluster:', l)
             if l != good_cl:
                 scores[i] = 0
+        
+        # 可视化结果
+        if self.enable_visualization:
+            print(f'[LFighter] Cluster quality: cs0={cs0:.4f}, cs1={cs1:.4f}, good_cluster={good_cl}')
+            print(f'[LFighter] Selected good clients: {np.sum(scores)}/{m}')
+            
+            if self.should_visualize_this_round():
+                # 创建总结报告
+                metrics = {
+                    'total_clients': m,
+                    'good_clients': int(np.sum(scores)),
+                    'accuracy': int(np.sum(scores)) / m,
+                    'cs0': cs0,
+                    'cs1': cs1,
+                    'good_cluster': good_cl,
+                    'reduction_method': reduction_method,
+                    'anomalous_classes': str(max_two_freq_classes)
+                }
+                
+                # 生成PDF报告（如果启用）
+                self.create_pdf_report(self.round_counter, data_reduced, labels, ptypes, scores, cs0, cs1, good_cl, metrics)
+                
+                # 生成单独的PNG文件（如果需要）
+                if self.keep_individual_files:
+                    self.visualize_feature_space(data_reduced, labels, ptypes, self.round_counter)
+                    self.visualize_cluster_quality(cs0, cs1, good_cl, self.round_counter)
+                    self.visualize_client_scores(scores, ptypes, self.round_counter)
+                    self.create_summary_report(self.round_counter, metrics)
+                
+                # 清理旧的可视化文件
+                self.cleanup_old_visualizations()
             
         global_weights = average_weights(local_weights, scores)
         return global_weights
+
 
 ################################################
 # Takes in grad
@@ -214,6 +775,9 @@ class FoolsGold:
 
 
 #######################################################################################
+
+
+
 class LFighterDBO:
     def __init__(self):
         pass
@@ -716,7 +1280,7 @@ class LFighterMVDBO:
         lfighter_mv = LFighterMV()
         
         # 创建一个临时的LFD实例用于聚类质量评估  
-        lfd = LFD(config.NUM_CLASSES)
+        lfd = LFD(config.NUM_CLASSES, attack_ratio=getattr(config, 'ATTACKERS_RATIO', None))
         
         # 调用LFighterMV来获取处理好的多视图特征（但不用它的聚类结果）
         # 我们需要手动调用LFighterMV的特征提取部分
@@ -1191,34 +1755,606 @@ def Krum(updates, f, multi = False):
 ##################################################################
 
 class LFighterAutoencoder:
-    def __init__(self, num_classes, ae_hidden_dim=128, ae_latent_dim=32, ae_epochs=50, reconstruction_weight=0.3):
+    def __init__(self, num_classes, ae_hidden_dim=128, ae_latent_dim=32, ae_epochs=50, reconstruction_weight=0.2, 
+                 enable_visualization=True, save_path="./figures/", 
+                 visualization_frequency=1, max_visualizations=0, save_final_only=False,
+                 save_as_pdf=True, keep_individual_files=False, attack_ratio=None):
         """
-        LFighter with Autoencoder optimization
+        LFighterAutoencoder类初始化
         
         Args:
             num_classes: 类别数量
-            ae_hidden_dim: autoencoder隐藏层维度
-            ae_latent_dim: autoencoder潜在空间维度  
-            ae_epochs: autoencoder训练轮数
-            reconstruction_weight: 重构误差在最终得分中的权重
+            ae_hidden_dim: 自编码器隐藏层维度
+            ae_latent_dim: 自编码器潜在空间维度
+            ae_epochs: 自编码器训练轮数
+            reconstruction_weight: 重构误差权重
+            enable_visualization: 是否启用可视化
+            save_path: 保存路径
+            visualization_frequency: 可视化频率
+            max_visualizations: 最大可视化数量
+            save_final_only: 是否只保存最终轮次
+            save_as_pdf: 是否保存为PDF (默认True，始终启用)
+            keep_individual_files: 始终禁用单独文件，忽略传入的参数
+            attack_ratio: 攻击者比率，用于PDF文件名
+            
+        特性:
+            - 使用输出层的全部梯度作为特征，而不是仅选择部分类别
+            - 通过自编码器进行特征降维和异常检测
+            - 结合聚类和重构误差进行攻击者识别
+            - 仅生成PDF报告，不生成单独文件
         """
-        self.memory = np.zeros([num_classes])
+        self.num_classes = num_classes
+        self.memory = np.zeros(num_classes)
+        
+        # Autoencoder相关参数
         self.ae_hidden_dim = ae_hidden_dim
         self.ae_latent_dim = ae_latent_dim
         self.ae_epochs = ae_epochs
         self.reconstruction_weight = reconstruction_weight
     
+        # 可视化相关参数
+        self.enable_visualization = enable_visualization
+        self.save_path = save_path
+        self.visualization_frequency = visualization_frequency
+        self.max_visualizations = max_visualizations
+        self.save_final_only = save_final_only
+        self.save_as_pdf = True  # 始终保存为PDF，忽略传入的参数
+        self.keep_individual_files = False  # 始终禁用单独文件，忽略传入的参数
+        self.attack_ratio = attack_ratio
+        
+        # 轮数计数器
+        self.round_counter = 0
+        self.total_rounds = None
+        self.visualization_count = 0
+        
+        # PDF文件管理
+        self.pdf_pages = None
+        self.pdf_filename = None
+        
+        # 确保保存目录存在
+        if self.enable_visualization:
+            os.makedirs(self.save_path, exist_ok=True)
+            
+            # 创建PDF文件（如果启用PDF保存）
+            if self.save_as_pdf:
+                self._initialize_pdf()
+    
+    def _initialize_pdf(self):
+        """初始化PDF文件"""
+        try:
+            from matplotlib.backends.backend_pdf import PdfPages
+            attack_str = f"_atr{self.attack_ratio:.1f}" if self.attack_ratio is not None else ""
+            self.pdf_filename = f'{self.save_path}/lfighter_ae_complete_report{attack_str}.pdf'
+            self.pdf_pages = PdfPages(self.pdf_filename)
+            print(f"[LFighter-AE] 🔗 PDF报告初始化成功")
+            print(f"[LFighter-AE] 📄 实时查看路径: {self.pdf_filename}")
+        except Exception as e:
+            print(f"[LFighter-AE] PDF初始化失败: {e}")
+            self.pdf_pages = None
+    
+    def finalize_pdf(self):
+        """关闭PDF文件"""
+        if self.pdf_pages is not None:
+            try:
+                self.pdf_pages.close()
+                print(f"[LFighter-AE] PDF报告已保存: {self.pdf_filename}")
+            except Exception as e:
+                print(f"[LFighter-AE] PDF关闭失败: {e}")
+            finally:
+                self.pdf_pages = None
+    
+    def set_total_rounds(self, total_rounds):
+        """设置总训练轮数，用于save_final_only模式"""
+        self.total_rounds = total_rounds
+        print(f"[LFighter-AE] Set total rounds to {total_rounds} for visualization control")
+    
+    def should_visualize_this_round(self):
+        """判断当前轮次是否应该保存可视化"""
+        if not self.enable_visualization:
+            return False
+            
+        # 如果设置为只保存最后一轮
+        if self.save_final_only:
+            return self.total_rounds is not None and self.round_counter == self.total_rounds
+        
+        # 动态调整可视化频率：前20轮每轮可视化，后续每10轮一次
+        if self.round_counter <= 20:
+            current_frequency = 1
+        else:
+            current_frequency = 10
+        
+        # 按动态频率保存
+        return self.round_counter % current_frequency == 0
+    
+    def cleanup_old_visualizations(self):
+        """清理旧的可视化文件"""
+        if not self.enable_visualization:
+            return
+        
+        if self.max_visualizations > 0 and self.visualization_count > self.max_visualizations:
+            # 清理PNG文件
+            png_files = [f for f in os.listdir(self.save_path) if f.startswith('lfighter_') and f.endswith('.png')]
+            png_files.sort(key=lambda x: os.path.getctime(os.path.join(self.save_path, x)))
+            
+            while len(png_files) > self.max_visualizations:
+                old_file = os.path.join(self.save_path, png_files.pop(0))
+                if os.path.exists(old_file):
+                    os.remove(old_file)
+            
+            # 清理文本文件
+            txt_files = [f for f in os.listdir(self.save_path) if f.startswith('lfighter_') and f.endswith('.txt')]
+            txt_files.sort(key=lambda x: os.path.getctime(os.path.join(self.save_path, x)))
+            
+            while len(txt_files) > self.max_visualizations:
+                old_file = os.path.join(self.save_path, txt_files.pop(0))
+                if os.path.exists(old_file):
+                    os.remove(old_file)
+    
+    def create_pdf_report(self, round_num, features, labels, ptypes, scores, cs0, cs1, good_cl, metrics):
+        """向已有PDF文件添加当前轮次的可视化页面 - LFighter-AE版本"""
+        if not self.should_visualize_this_round() or not self.save_as_pdf or self.pdf_pages is None:
+            return
+        
+        try:
+            # 第一页：特征空间可视化（原始vs潜在特征）
+            fig, axes = plt.subplots(1, 2, figsize=(16, 8))
+            
+            # t-SNE降维
+            if features.shape[1] > 2:
+                try:
+                    perplexity = min(30, len(features)-1)
+                    if perplexity < 1:
+                        perplexity = 1
+                    tsne = TSNE(n_components=2, random_state=42, perplexity=perplexity)
+                    features_2d = tsne.fit_transform(features)
+                except:
+                    from sklearn.decomposition import PCA
+                    pca = PCA(n_components=2, random_state=42)
+                    features_2d = pca.fit_transform(features)
+            else:
+                features_2d = features
+            
+            # 按客户端类型着色
+            colors = []
+            malicious_count = 0
+            for ptype in ptypes:
+                ptype_str = str(ptype).lower()
+                if ('malicious' in ptype_str or 'attack' in ptype_str or 
+                    'bad' in ptype_str or 'adversarial' in ptype_str):
+                    colors.append('red')
+                    malicious_count += 1
+                else:
+                    colors.append('blue')
+            
+            axes[0].scatter(features_2d[:, 0], features_2d[:, 1], c=colors, alpha=0.7, s=100)
+            axes[0].set_title('LFighter-AE: Feature Space (by Client Type)', fontsize=14)
+            axes[0].set_xlabel('Dimension 1')
+            axes[0].set_ylabel('Dimension 2')
+            
+            red_patch = plt.matplotlib.patches.Patch(color='red', label='Malicious')
+            blue_patch = plt.matplotlib.patches.Patch(color='blue', label='Benign')
+            axes[0].legend(handles=[red_patch, blue_patch])
+            
+            # 按聚类结果着色
+            cluster_colors = ['orange', 'green']
+            for i in range(len(features_2d)):
+                axes[1].scatter(features_2d[i, 0], features_2d[i, 1], 
+                               c=cluster_colors[labels[i]], alpha=0.7, s=100)
+            axes[1].set_title('LFighter-AE: Feature Space (by Cluster)', fontsize=14)
+            axes[1].set_xlabel('Dimension 1')
+            axes[1].set_ylabel('Dimension 2')
+            
+            orange_patch = plt.matplotlib.patches.Patch(color='orange', label='Cluster 0')
+            green_patch = plt.matplotlib.patches.Patch(color='green', label='Cluster 1')
+            axes[1].legend(handles=[orange_patch, green_patch])
+            
+            plt.suptitle(f'LFighter-AE Algorithm - Round {round_num} - Feature Space Analysis', fontsize=16)
+            plt.tight_layout()
+            self.pdf_pages.savefig(fig, bbox_inches='tight')
+            plt.close()
+            
+            # 第二页：聚类质量和客户端得分
+            fig, axes = plt.subplots(2, 2, figsize=(16, 12))
+            
+            # 聚类质量
+            clusters = ['Cluster 0', 'Cluster 1']
+            dissimilarities = [cs0, cs1]
+            cluster_quality_colors = ['green' if i == good_cl else 'red' for i in range(2)]
+            
+            bars = axes[0, 0].bar(clusters, dissimilarities, color=cluster_quality_colors, alpha=0.7)
+            axes[0, 0].set_ylabel('Dissimilarity Score')
+            axes[0, 0].set_title('Cluster Quality Comparison')
+            axes[0, 0].grid(True, alpha=0.3)
+            
+            for i, (bar, score) in enumerate(zip(bars, dissimilarities)):
+                axes[0, 0].text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.01,
+                              f'{score:.4f}', ha='center', va='bottom')
+            
+            axes[0, 0].text(good_cl, dissimilarities[good_cl] + 0.05, '✓ Good Cluster', 
+                           ha='center', va='bottom', fontsize=12, fontweight='bold')
+            
+            # 客户端得分条形图
+            client_indices = range(len(scores))
+            bars = axes[0, 1].bar(client_indices, scores, color=colors, alpha=0.7)
+            axes[0, 1].set_title('Client Scores')
+            axes[0, 1].set_xlabel('Client Index')
+            axes[0, 1].set_ylabel('Score')
+            axes[0, 1].set_ylim(0, 1.1)
+            axes[0, 1].grid(True, alpha=0.3)
+            
+            # 得分分布直方图
+            axes[1, 0].hist(scores, bins=10, alpha=0.7, color='skyblue', edgecolor='black')
+            axes[1, 0].axvline(np.mean(scores), color='red', linestyle='--', 
+                              label=f'Mean: {np.mean(scores):.4f}')
+            axes[1, 0].axvline(np.median(scores), color='orange', linestyle='--', 
+                              label=f'Median: {np.median(scores):.4f}')
+            axes[1, 0].set_xlabel('Score')
+            axes[1, 0].set_ylabel('Frequency')
+            axes[1, 0].set_title('Score Distribution')
+            axes[1, 0].legend()
+            axes[1, 0].grid(True, alpha=0.3)
+            
+            # 性能指标文本
+            axes[1, 1].axis('off')
+            attack_ratio_str = f"Attack Ratio: {self.attack_ratio:.1f}" if self.attack_ratio is not None else "Attack Ratio: N/A"
+            metrics_text = f"""
+Performance Metrics - Round {round_num}
+
+{attack_ratio_str}
+Total Clients: {metrics.get('total_clients', 'N/A')}
+Good Clients Selected: {metrics.get('good_clients', 'N/A')}
+Selection Accuracy: {metrics.get('accuracy', 'N/A'):.2%}
+
+Cluster Analysis:
+• Cluster 0 Dissimilarity: {metrics.get('cs0', 'N/A'):.4f}
+• Cluster 1 Dissimilarity: {metrics.get('cs1', 'N/A'):.4f}
+• Good Cluster: {metrics.get('good_cluster', 'N/A')}
+
+Feature Processing:
+• Reduction Method: {metrics.get('reduction_method', 'N/A')}
+• Selected Classes: {metrics.get('selected_classes', 'N/A')}
+• Attack Scope: {metrics.get('attack_scope', 'N/A')}
+• Attack Type: {metrics.get('attack_type', 'N/A')}
+
+Autoencoder:
+• Reconstruction Weight: {metrics.get('fixed_recon_weight', 'N/A'):.2f}
+• Mean Recon Error: {metrics.get('mean_recon_error', 'N/A'):.4f}
+
+Algorithm: LFighter + Autoencoder (Deep feature learning)
+Timestamp: {time.strftime('%Y-%m-%d %H:%M:%S')}
+"""
+            axes[1, 1].text(0.05, 0.95, metrics_text, transform=axes[1, 1].transAxes, 
+                           fontsize=10, verticalalignment='top', fontfamily='monospace')
+            
+            plt.suptitle(f'LFighter-AE Algorithm - Round {round_num} - Performance Analysis', fontsize=16)
+            plt.tight_layout()
+            self.pdf_pages.savefig(fig, bbox_inches='tight')
+            plt.close()
+            
+            # 强制刷新PDF文件，确保实时可见
+            try:
+                # matplotlib PdfPages 的正确flush方法
+                if hasattr(self.pdf_pages, '_file') and hasattr(self.pdf_pages._file, '_file'):
+                    self.pdf_pages._file._file.flush()
+                    import os
+                    os.fsync(self.pdf_pages._file._file.fileno())
+                elif hasattr(self.pdf_pages, 'flush'):
+                    self.pdf_pages.flush()
+            except:
+                pass  # 忽略flush错误，不影响正常功能
+            
+            print(f"[LFighter-AE] Round {round_num} 添加到PDF报告 - 实时可查看: {self.pdf_filename}")
+            
+        except Exception as e:
+            print(f"[LFighter-AE] PDF页面添加失败 Round {round_num}: {e}")
+    
+    def visualize_training_process(self, losses, round_num):
+        """可视化autoencoder训练过程"""
+        if not self.should_visualize_this_round():
+            return
+            
+        # 只在PDF报告中添加训练过程图表，不生成单独的图片文件
+        if self.save_as_pdf and self.pdf_pages is not None:
+            plt.figure(figsize=(10, 6))
+            plt.plot(losses, 'b-', linewidth=2, label='Reconstruction Loss')
+            plt.xlabel('Epoch')
+            plt.ylabel('Loss')
+            plt.title(f'Autoencoder Training Process (Round {round_num})')
+            plt.legend()
+            plt.grid(True, alpha=0.3)
+            plt.tight_layout()
+            try:
+                self.pdf_pages.savefig(plt.gcf(), bbox_inches='tight')
+            except Exception as e:
+                print(f"[LFighter-AE] 训练过程可视化添加到PDF失败: {e}")
+            plt.close()
+    
+    def visualize_feature_space(self, original_features, latent_features, labels, ptypes, round_num):
+        """可视化原始和潜在特征空间的对比"""
+        if not self.should_visualize_this_round():
+            return
+        
+        # 调试信息：打印客户端类型
+        if self.enable_visualization and round_num == 1:  # 只在第一轮打印
+            print(f"[LFighter-AE Debug] Client types: {ptypes[:10]}...")  # 打印前10个客户端类型
+        
+        # 只在PDF报告中添加特征空间可视化，不生成单独的图片文件
+        if self.save_as_pdf and self.pdf_pages is not None:
+            fig, axes = plt.subplots(2, 2, figsize=(16, 12))
+            
+            # 对两种特征空间进行t-SNE降维
+            features_list = [original_features, latent_features]
+            feature_names = ['Original Features', 'Latent Features']
+            
+            for row, (features, name) in enumerate(zip(features_list, feature_names)):
+                # t-SNE降维
+                if features.shape[1] > 2:
+                    try:
+                        perplexity = min(30, len(features)-1)
+                        if perplexity < 1:
+                            perplexity = 1
+                        tsne = TSNE(n_components=2, random_state=42, perplexity=perplexity)
+                        features_2d = tsne.fit_transform(features)
+                    except:
+                        # 如果t-SNE失败，使用PCA
+                        from sklearn.decomposition import PCA
+                        pca = PCA(n_components=2, random_state=42)
+                        features_2d = pca.fit_transform(features)
+                else:
+                    features_2d = features
+                
+                # 1. 按客户端类型着色 - 增强检测逻辑
+                colors = []
+                malicious_count = 0
+                for ptype in ptypes:
+                    ptype_str = str(ptype).lower()
+                    if ('malicious' in ptype_str or 'attack' in ptype_str or 
+                        'bad' in ptype_str or 'adversarial' in ptype_str):
+                        colors.append('red')
+                        malicious_count += 1
+                    else:
+                        colors.append('blue')
+                
+                # 调试信息：打印检测结果（只在第一轮和原始特征时打印）
+                if self.enable_visualization and round_num == 1 and row == 0:
+                    print(f"[LFighter-AE Debug] Detected {malicious_count}/{len(ptypes)} malicious clients")
+                
+                axes[row, 0].scatter(features_2d[:, 0], features_2d[:, 1], c=colors, alpha=0.7, s=100)
+                axes[row, 0].set_title(f'{name} (by Client Type)')
+                axes[row, 0].set_xlabel('Dimension 1')
+                axes[row, 0].set_ylabel('Dimension 2')
+                
+                # 添加图例
+                red_patch = plt.matplotlib.patches.Patch(color='red', label='Malicious')
+                blue_patch = plt.matplotlib.patches.Patch(color='blue', label='Benign')
+                axes[row, 0].legend(handles=[red_patch, blue_patch])
+                
+                # 2. 按聚类结果着色
+                cluster_colors = ['orange', 'green']
+                for i in range(len(features_2d)):
+                    axes[row, 1].scatter(features_2d[i, 0], features_2d[i, 1], 
+                                       c=cluster_colors[labels[i]], alpha=0.7, s=100)
+                axes[row, 1].set_title(f'{name} (by Cluster)')
+                axes[row, 1].set_xlabel('Dimension 1')
+                axes[row, 1].set_ylabel('Dimension 2')
+                
+                # 添加聚类图例
+                orange_patch = plt.matplotlib.patches.Patch(color='orange', label='Cluster 0')
+                green_patch = plt.matplotlib.patches.Patch(color='green', label='Cluster 1')
+                axes[row, 1].legend(handles=[orange_patch, green_patch])
+            
+            plt.tight_layout()
+            try:
+                self.pdf_pages.savefig(fig, bbox_inches='tight')
+            except Exception as e:
+                print(f"[LFighter-AE] 特征空间可视化添加到PDF失败: {e}")
+            plt.close()
+    
+    def visualize_reconstruction_errors(self, reconstruction_errors, ptypes, round_num):
+        """可视化重构误差分布和各客户端的重构误差"""
+        if not self.should_visualize_this_round():
+            return
+        
+        # 只在PDF报告中添加重构误差可视化，不生成单独的图片文件
+        if self.save_as_pdf and self.pdf_pages is not None:
+            fig, axes = plt.subplots(1, 2, figsize=(16, 6))
+            
+            # 1. 重构误差分布直方图
+            axes[0].hist(reconstruction_errors, bins=15, alpha=0.7, color='skyblue', edgecolor='black')
+            axes[0].axvline(np.mean(reconstruction_errors), color='red', linestyle='--', 
+                           label=f'Mean: {np.mean(reconstruction_errors):.4f}')
+            axes[0].axvline(np.median(reconstruction_errors), color='orange', linestyle='--', 
+                           label=f'Median: {np.median(reconstruction_errors):.4f}')
+            axes[0].set_xlabel('Reconstruction Error')
+            axes[0].set_ylabel('Frequency')
+            axes[0].set_title('Reconstruction Error Distribution')
+            axes[0].legend()
+            axes[0].grid(True, alpha=0.3)
+            
+            # 2. 各客户端重构误差条形图 - 增强检测逻辑
+            client_indices = range(len(reconstruction_errors))
+            colors = []
+            for ptype in ptypes:
+                ptype_str = str(ptype).lower()
+                if ('malicious' in ptype_str or 'attack' in ptype_str or 
+                    'bad' in ptype_str or 'adversarial' in ptype_str):
+                    colors.append('red')
+                else:
+                    colors.append('blue')
+            
+            bars = axes[1].bar(client_indices, reconstruction_errors, color=colors, alpha=0.7)
+            axes[1].set_title('Client Reconstruction Errors')
+            axes[1].set_xlabel('Client Index')
+            axes[1].set_ylabel('Reconstruction Error')
+            axes[1].grid(True, alpha=0.3)
+            
+            # 添加图例
+            red_patch = plt.matplotlib.patches.Patch(color='red', label='Malicious')
+            blue_patch = plt.matplotlib.patches.Patch(color='blue', label='Benign')
+            axes[1].legend(handles=[red_patch, blue_patch])
+            
+            plt.tight_layout()
+            try:
+                self.pdf_pages.savefig(fig, bbox_inches='tight')
+            except Exception as e:
+                print(f"[LFighter-AE] 重构误差可视化添加到PDF失败: {e}")
+            plt.close()
+    
+    def visualize_client_scores(self, cluster_scores, recon_scores, final_scores, ptypes, round_num):
+        """可视化客户端的聚类得分、重构得分和最终得分"""
+        if not self.should_visualize_this_round():
+            return
+        
+        # 只在PDF报告中添加客户端得分可视化，不生成单独的图片文件
+        if self.save_as_pdf and self.pdf_pages is not None:
+            fig, axes = plt.subplots(2, 2, figsize=(16, 12))
+            
+            client_indices = range(len(final_scores))
+            
+            # 增强的客户端类型检测逻辑
+            colors = []
+            malicious_count = 0
+            for ptype in ptypes:
+                ptype_str = str(ptype).lower()
+                if ('malicious' in ptype_str or 'attack' in ptype_str or 
+                    'bad' in ptype_str or 'adversarial' in ptype_str):
+                    colors.append('red')
+                    malicious_count += 1
+                else:
+                    colors.append('blue')
+            
+            # 调试信息：打印检测结果
+            if self.enable_visualization and round_num == 1:
+                print(f"[LFighter-AE Client Scores] Detected {malicious_count}/{len(ptypes)} malicious clients")
+            
+            # 1. 聚类得分
+            axes[0, 0].bar(client_indices, cluster_scores, color=colors, alpha=0.7)
+            axes[0, 0].set_title('Cluster Scores')
+            axes[0, 0].set_xlabel('Client Index')
+            axes[0, 0].set_ylabel('Cluster Score')
+            axes[0, 0].set_ylim(0, 1.1)
+            axes[0, 0].grid(True, alpha=0.3)
+            
+            # 2. 重构得分
+            axes[0, 1].bar(client_indices, recon_scores, color=colors, alpha=0.7)
+            axes[0, 1].set_title('Reconstruction Scores')
+            axes[0, 1].set_xlabel('Client Index')
+            axes[0, 1].set_ylabel('Reconstruction Score')
+            axes[0, 1].set_ylim(0, 1.1)
+            axes[0, 1].grid(True, alpha=0.3)
+            
+            # 3. 最终得分
+            axes[1, 0].bar(client_indices, final_scores, color=colors, alpha=0.7)
+            axes[1, 0].set_title('Final Scores (Weighted Combination)')
+            axes[1, 0].set_xlabel('Client Index')
+            axes[1, 0].set_ylabel('Final Score')
+            axes[1, 0].set_ylim(0, 1.1)
+            axes[1, 0].grid(True, alpha=0.3)
+            
+            # 添加图例
+            red_patch = plt.matplotlib.patches.Patch(color='red', label='Malicious')
+            blue_patch = plt.matplotlib.patches.Patch(color='blue', label='Benign')
+            axes[1, 0].legend(handles=[red_patch, blue_patch])
+            
+            # 4. 得分对比散点图
+            axes[1, 1].scatter(cluster_scores, recon_scores, c=colors, alpha=0.7, s=100)
+            axes[1, 1].set_xlabel('Cluster Score')
+            axes[1, 1].set_ylabel('Reconstruction Score')
+            axes[1, 1].set_title('Cluster vs Reconstruction Scores')
+            axes[1, 1].grid(True, alpha=0.3)
+            
+            plt.tight_layout()
+            try:
+                self.pdf_pages.savefig(fig, bbox_inches='tight')
+            except Exception as e:
+                print(f"[LFighter-AE] 客户端得分可视化添加到PDF失败: {e}")
+            plt.close()
+    
+    
+    def visualize_cluster_quality(self, cs0, cs1, good_cl, round_num):
+        """可视化聚类质量"""
+        if not self.should_visualize_this_round():
+            return
+            
+        # 只在PDF报告中添加聚类质量可视化，不生成单独的图片文件
+        if self.save_as_pdf and self.pdf_pages is not None:
+            plt.figure(figsize=(10, 6))
+            clusters = ['Cluster 0', 'Cluster 1']
+            dissimilarities = [cs0, cs1]
+            colors = ['green' if i == good_cl else 'red' for i in range(2)]
+            
+            plt.bar(clusters, dissimilarities, color=colors, alpha=0.7)
+            plt.ylabel('Dissimilarity Score')
+            plt.title('Cluster Quality Comparison')
+            plt.grid(True, alpha=0.3)
+            
+            # 添加图例
+            green_patch = plt.matplotlib.patches.Patch(color='green', label='Good Cluster')
+            red_patch = plt.matplotlib.patches.Patch(color='red', label='Bad Cluster')
+            plt.legend(handles=[green_patch, red_patch])
+            
+            try:
+                self.pdf_pages.savefig(plt.gcf(), bbox_inches='tight')
+            except Exception as e:
+                print(f"[LFighter-AE] 聚类质量可视化添加到PDF失败: {e}")
+            plt.close()
+    
+            plt.close()
+    
+            if attack_scope == 'large_multi':
+                analysis['attack_type'] = 'large_multi_target'
+                analysis['confidence'] = 0.85
+                analysis['pattern_description'] = f'大规模多标签攻击，涉及{len(selected_classes)}个类别'
+            elif attack_scope == 'small_multi':
+                high_score_classes = selected_classes[relative_scores > 0.7]
+                if len(high_score_classes) >= 3:
+                    analysis['attack_type'] = 'small_multi_target'
+                    analysis['confidence'] = 0.8
+                    analysis['pattern_description'] = f'小规模多标签攻击，{len(high_score_classes)}个高影响类别'
+                else:
+                    analysis['attack_type'] = 'complex_sparse'
+                    analysis['confidence'] = 0.6
+                    analysis['pattern_description'] = f'复杂稀疏攻击模式，涉及{len(selected_classes)}个类别'
+            elif attack_scope == 'traditional':
+                analysis['attack_type'] = 'simple_targeted'
+                analysis['confidence'] = 0.9
+                analysis['pattern_description'] = '传统单源-单目标攻击'
+            else:
+                analysis['attack_type'] = 'unknown_local'
+                analysis['confidence'] = 0.3
+                analysis['pattern_description'] = '未知局部攻击模式'
+        
+        print(f'[LFighter-AE] 攻击模式分析: {analysis["attack_type"]} (confidence: {analysis["confidence"]:.2f})')
+        print(f'[LFighter-AE] 模式描述: {analysis["pattern_description"]}')
+        print(f'[LFighter-AE] 攻击范围: {attack_scope}')
+        
+        return analysis
+        
     def clusters_dissimilarity(self, clusters):
-        """计算聚类间相异性（重用LFD的方法）"""
+        """计算聚类间相异性，处理空聚类情况"""
         n0 = len(clusters[0])
         n1 = len(clusters[1])
         m = n0 + n1 
-        cs0 = smp.cosine_similarity(clusters[0]) - np.eye(n0)
-        cs1 = smp.cosine_similarity(clusters[1]) - np.eye(n1)
-        mincs0 = np.min(cs0, axis=1)
-        mincs1 = np.min(cs1, axis=1)
-        ds0 = n0/m * (1 - np.mean(mincs0))
-        ds1 = n1/m * (1 - np.mean(mincs1))
+        
+        # 处理空聚类情况
+        if n0 == 0:
+            return 1.0, 0.0  # 空聚类0，聚类1更好
+        if n1 == 0:
+            return 0.0, 1.0  # 空聚类1，聚类0更好
+        if n0 == 1:
+            ds0 = 1.0  # 单样本聚类质量设为最差
+        else:
+            cs0 = smp.cosine_similarity(clusters[0]) - np.eye(n0)
+            mincs0 = np.min(cs0, axis=1)
+            ds0 = n0/m * (1 - np.mean(mincs0))
+        
+        if n1 == 1:
+            ds1 = 1.0  # 单样本聚类质量设为最差
+        else:
+            cs1 = smp.cosine_similarity(clusters[1]) - np.eye(n1)
+            mincs1 = np.min(cs1, axis=1)
+            ds1 = n1/m * (1 - np.mean(mincs1))
+        
         return ds0, ds1
     
     def create_autoencoder(self, input_dim, device):
@@ -1261,6 +2397,9 @@ class LFighterAutoencoder:
         optimizer = optim.Adam(autoencoder.parameters(), lr=0.001, weight_decay=1e-5)
         criterion = nn.MSELoss()
         
+        # 记录训练损失用于可视化
+        training_losses = []
+        
         # 训练autoencoder
         autoencoder.train()
         for epoch in range(self.ae_epochs):
@@ -1270,8 +2409,15 @@ class LFighterAutoencoder:
             loss.backward()
             optimizer.step()
             
+            # 记录损失
+            training_losses.append(loss.item())
+            
             if epoch % 10 == 0:
                 print(f'[LFighter-AE] Autoencoder Epoch {epoch+1}/{self.ae_epochs}: Loss={loss.item():.6f}')
+        
+        # 可视化训练过程
+        if self.should_visualize_this_round():
+            self.visualize_training_process(training_losses, self.round_counter)
         
         # 获取潜在表示和重构误差
         autoencoder.eval()
@@ -1279,12 +2425,19 @@ class LFighterAutoencoder:
             encoded, decoded = autoencoder(features_tensor)
             reconstruction_errors = torch.mean((features_tensor - decoded) ** 2, dim=1)
         
-        return encoded.cpu().numpy(), reconstruction_errors.cpu().numpy()
+        return encoded.cpu().numpy(), reconstruction_errors.cpu().numpy(), training_losses[-1]
     
     def aggregate(self, global_model, local_models, ptypes):
         """基于LFighter + Autoencoder的聚合方法"""
         import config
         device = getattr(config, 'DEVICE', 'cpu')
+        
+        # 增加轮数计数
+        self.round_counter += 1
+        # 提示当前可视化频率
+        current_freq = 1 if self.round_counter <= 20 else 10
+        next_viz_round = self.round_counter if self.round_counter % current_freq == 0 else ((self.round_counter // current_freq) + 1) * current_freq
+        print(f"[LFighter-AE] Round {self.round_counter} - Visualization freq: every {current_freq} rounds (next: round {next_viz_round})")
         
         local_weights = [copy.deepcopy(model).state_dict() for model in local_models]
         m = len(local_models)
@@ -1310,7 +2463,7 @@ class LFighterAutoencoder:
                 data.append(dw[i].reshape(-1))
             
             # 使用autoencoder进行特征学习
-            latent_features, reconstruction_errors = self.train_autoencoder(data, device)
+            latent_features, reconstruction_errors, final_loss = self.train_autoencoder(data, device)
             
             # 原始K-means聚类（在潜在空间中）
             kmeans = KMeans(n_clusters=2, random_state=0).fit(latent_features)
@@ -1342,21 +2495,89 @@ class LFighterAutoencoder:
             print(f'[LFighter-AE] Cluster quality: cs0={cs0:.4f}, cs1={cs1:.4f}, good_cluster={good_cl}')
             print(f'[LFighter-AE] Reconstruction errors: mean={reconstruction_errors.mean():.4f}, std={reconstruction_errors.std():.4f}')
             
+                        # 可视化结果
+            if self.should_visualize_this_round():
+                # 创建总结报告
+                metrics = {
+                    'total_clients': m,
+                    'good_clients': int(np.sum(final_scores > 0.5)),
+                    'accuracy': int(np.sum(final_scores > 0.5)) / m,
+                    'cs0': cs0,
+                    'cs1': cs1,
+                    'good_cluster': good_cl,
+                    'mean_recon_error': reconstruction_errors.mean(),
+                    'std_recon_error': reconstruction_errors.std(),
+                    'final_loss': final_loss,
+                    'reduction_method': 'Binary classification',
+                    'attack_type': 'Binary classification mode',
+                    'fixed_recon_weight': self.reconstruction_weight
+                }
+                
+                # 仅生成PDF报告，不生成单独的图片和文本文件
+                self.create_pdf_report(self.round_counter, latent_features, labels, ptypes, final_scores, cs0, cs1, good_cl, metrics)
+            
             global_weights = average_weights(local_weights, final_scores)
             return global_weights
 
         # 处理多分类情况
-        # 检测异常类别（与原LFighter一致）
+        # 检测异常类别（改进版：支持多标签攻击）
         norms = np.linalg.norm(dw, axis=-1)
         self.memory = np.sum(norms, axis=0)
         self.memory += np.sum(abs(db), axis=0)
-        max_two_freq_classes = self.memory.argsort()[-2:]
-        print(f'[LFighter-AE] Potential source and target classes: {max_two_freq_classes}')
         
-        # 提取关键类别的特征
+        # 通用攻击检测策略：自适应选择局部vs全局特征
+        sorted_classes = self.memory.argsort()
+        memory_normalized = self.memory / (np.max(self.memory) + 1e-8)
+        
+        # 分析攻击分布模式
+        high_threshold = 0.6  # 高影响阈值
+        medium_threshold = 0.3  # 中等影响阈值
+        
+        high_impact_classes = sorted_classes[memory_normalized[sorted_classes] > high_threshold]
+        medium_impact_classes = sorted_classes[memory_normalized[sorted_classes] > medium_threshold]
+        
+        # 计算攻击分布的均匀性
+        memory_std = np.std(memory_normalized)
+        memory_cv = memory_std / (np.mean(memory_normalized) + 1e-8)  # 变异系数
+        
+        print(f'[LFighter-AE] Memory scores: {dict(zip(range(len(self.memory)), self.memory))}')
+        print(f'[LFighter-AE] Memory CV (变异系数): {memory_cv:.4f}')
+        print(f'[LFighter-AE] High impact classes (>{high_threshold}): {high_impact_classes}')
+        print(f'[LFighter-AE] Medium impact classes (>{medium_threshold}): {medium_impact_classes}')
+        
+        # 根据攻击分布选择特征提取策略
+        if memory_cv < 0.5 and len(medium_impact_classes) >= len(self.memory) * 0.6:
+            # 全局攻击模式（如1移位攻击）：所有类别都受到较均匀的影响
+            attack_scope = 'global'
+            selected_classes = list(range(len(self.memory)))  # 使用所有类别
+            print(f'[LFighter-AE] 检测到全局攻击模式，使用所有{len(selected_classes)}个类别')
+        elif len(high_impact_classes) >= 4:
+            # 大规模多标签攻击
+            attack_scope = 'large_multi'
+            selected_classes = sorted_classes[-min(8, len(high_impact_classes) + 2):]
+            print(f'[LFighter-AE] 检测到大规模多标签攻击，使用{len(selected_classes)}个高影响类别')
+        elif len(high_impact_classes) >= 2:
+            # 小规模多标签攻击
+            attack_scope = 'small_multi'
+            selected_classes = sorted_classes[-min(6, len(high_impact_classes) + 1):]
+            print(f'[LFighter-AE] 检测到小规模多标签攻击，使用{len(selected_classes)}个类别')
+        else:
+            # 传统单一攻击或无明显攻击
+            attack_scope = 'traditional'
+            selected_classes = sorted_classes[-2:]
+            print(f'[LFighter-AE] 检测到传统攻击模式，使用{len(selected_classes)}个类别')
+        
+        # 分析攻击模式（使用新的参数）
+        attack_analysis = self.analyze_attack_pattern(selected_classes, self.memory, attack_scope, memory_cv)
+        
+        # 提取特征 - 修改为始终使用所有输出层梯度
         data = []
         for i in range(m):
-            data.append(dw[i][max_two_freq_classes].reshape(-1))
+            # 使用完整的梯度向量，不再区分攻击模式
+            global_features = np.concatenate([dw[i].reshape(-1), db[i].reshape(-1)])
+            data.append(global_features)
+            
+        print(f'[LFighter-AE] 使用全部输出层梯度作为特征 (维度: {len(data[0])})')
 
         # 统一降维处理（与原LFighter一致）
         def unified_dimension_reduction(features, target_dim=200, method='auto', standardize=True):
@@ -1390,7 +2611,7 @@ class LFighterAutoencoder:
         print(f'[LFighter-AE] Applied dimension reduction: {reduction_method}')
         
         # 使用autoencoder进行深度特征学习
-        latent_features, reconstruction_errors = self.train_autoencoder(data_reduced, device)
+        latent_features, reconstruction_errors, final_loss = self.train_autoencoder(data_reduced, device)
         
         # 在潜在空间中进行聚类
         kmeans = KMeans(n_clusters=2, random_state=0).fit(latent_features)
@@ -1416,6 +2637,9 @@ class LFighterAutoencoder:
         normalized_recon_errors = (reconstruction_errors - reconstruction_errors.min()) / (reconstruction_errors.max() - reconstruction_errors.min() + 1e-8)
         recon_scores = 1 - normalized_recon_errors
         
+        # 使用固定权重（不进行动态调整）
+        print(f'[LFighter-AE] 使用固定重构权重: {self.reconstruction_weight:.2f}')
+        
         # 组合最终得分
         final_scores = (1 - self.reconstruction_weight) * cluster_scores + self.reconstruction_weight * recon_scores
         
@@ -1424,8 +2648,114 @@ class LFighterAutoencoder:
         
         print(f'[LFighter-AE] Cluster quality: cs0={cs0:.4f}, cs1={cs1:.4f}, good_cluster={good_cl}')
         print(f'[LFighter-AE] Reconstruction errors: mean={reconstruction_errors.mean():.4f}, std={reconstruction_errors.std():.4f}')
+        print(f'[LFighter-AE] Fixed reconstruction weight: {self.reconstruction_weight:.2f}')
         print(f'[LFighter-AE] Final scores: {final_scores}')
         print(f'[LFighter-AE] Selected good clients: {np.sum(binary_scores)}/{m}')
         
+        # 可视化结果
+        # 可视化结果
+        if self.should_visualize_this_round():
+            metrics = {
+                'total_clients': m,
+                'good_clients': int(np.sum(binary_scores)),
+                'accuracy': int(np.sum(binary_scores)) / m,
+                'cs0': cs0,
+                'cs1': cs1,
+                'good_cluster': good_cl,
+                'mean_recon_error': reconstruction_errors.mean(),
+                'std_recon_error': reconstruction_errors.std(),
+                'final_loss': final_loss,
+                'reduction_method': reduction_method,
+                'feature_strategy': '使用全部输出层梯度',
+                'feature_dim': len(data[0]),
+                'selected_classes': str(selected_classes),  # 仅用于攻击模式分析
+                'num_selected_classes': len(selected_classes),
+                'attack_scope': attack_scope,
+                'memory_max': self.memory.max(),
+                'memory_mean': self.memory.mean(),
+                'attack_type': attack_analysis['attack_type'],
+                'attack_confidence': attack_analysis['confidence'],
+                'attack_description': attack_analysis['pattern_description'],
+                'fixed_recon_weight': self.reconstruction_weight
+            }
+            
+            # 仅生成PDF报告，不生成单独的图片和文本文件
+            self.create_pdf_report(self.round_counter, latent_features, labels, ptypes, binary_scores, cs0, cs1, good_cl, metrics)
+        
         global_weights = average_weights(local_weights, binary_scores)
         return global_weights
+
+    def create_summary_report(self, round_num, metrics):
+        """创建总结报告"""
+        if not self.should_visualize_this_round():
+            return
+        
+    def analyze_attack_pattern(self, selected_classes, memory_scores, attack_scope, memory_cv):
+        """
+        通用攻击模式分析，支持全局和局部攻击
+        
+        注意：虽然此方法仍然分析攻击模式，但现在特征提取总是使用全部输出层梯度，
+        不再根据攻击模式选择不同的特征子集。此分析仅用于调整重构权重和提供报告信息。
+        
+        Args:
+            selected_classes: 选定的类别索引（仅用于分析）
+            memory_scores: 每个类别的内存得分
+            attack_scope: 攻击范围类型
+            memory_cv: 内存得分的变异系数
+            
+        Returns:
+            包含攻击类型、置信度和描述的字典
+        """
+        analysis = {
+            'attack_type': 'unknown',
+            'confidence': 0.0,
+            'pattern_description': '',
+            'scope': attack_scope
+        }
+        
+        # 根据攻击范围进行不同的分析
+        if attack_scope == 'global':
+            # 全局攻击分析（如1移位攻击）
+            if memory_cv < 0.3:
+                analysis['attack_type'] = 'global_uniform'
+                analysis['confidence'] = 0.9
+                analysis['pattern_description'] = f'全局均匀攻击 (CV={memory_cv:.3f})，可能是移位攻击或全局标签翻转'
+            else:
+                analysis['attack_type'] = 'global_mixed'
+                analysis['confidence'] = 0.7
+                analysis['pattern_description'] = f'全局混合攻击 (CV={memory_cv:.3f})，影响所有类别但程度不均'
+        else:
+            # 局部攻击分析
+            max_score = memory_scores.max()
+            class_scores = memory_scores[selected_classes]
+            relative_scores = class_scores / max_score if max_score > 0 else class_scores
+            
+            if attack_scope == 'large_multi':
+                analysis['attack_type'] = 'large_multi_target'
+                analysis['confidence'] = 0.85
+                analysis['pattern_description'] = f'大规模多标签攻击，涉及{len(selected_classes)}个类别'
+            elif attack_scope == 'small_multi':
+                high_score_classes = selected_classes[relative_scores > 0.7]
+                if len(high_score_classes) >= 3:
+                    analysis['attack_type'] = 'small_multi_target'
+                    analysis['confidence'] = 0.8
+                    analysis['pattern_description'] = f'小规模多标签攻击，{len(high_score_classes)}个高影响类别'
+                else:
+                    analysis['attack_type'] = 'complex_sparse'
+                    analysis['confidence'] = 0.6
+                    analysis['pattern_description'] = f'复杂稀疏攻击模式，涉及{len(selected_classes)}个类别'
+            elif attack_scope == 'traditional':
+                analysis['attack_type'] = 'simple_targeted'
+                analysis['confidence'] = 0.9
+                analysis['pattern_description'] = '传统单源-单目标攻击'
+            else:
+                analysis['attack_type'] = 'unknown_local'
+                analysis['confidence'] = 0.3
+                analysis['pattern_description'] = '未知局部攻击模式'
+        
+        print(f'[LFighter-AE] 攻击模式分析: {analysis["attack_type"]} (confidence: {analysis["confidence"]:.2f})')
+        print(f'[LFighter-AE] 模式描述: {analysis["pattern_description"]}')
+        print(f'[LFighter-AE] 攻击范围: {attack_scope}')
+        
+        return analysis
+

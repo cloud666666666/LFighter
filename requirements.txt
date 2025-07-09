@@ -83,6 +83,7 @@ rich==14.0.0
 scikit-image==0.25.2
 scikit-learn==1.7.0
 scipy==1.15.3
+seaborn==0.13.2
 six==1.17.0
 stack-data==0.6.3
 sympy==1.14.0

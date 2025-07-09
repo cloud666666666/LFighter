@@ -6,7 +6,8 @@ def run_exp(dataset_name, model_name, dd_type,
     num_peers, frac_peers, seed, test_batch_size, criterion, global_rounds, 
     local_epochs, local_bs, local_lr , local_momentum , labels_dict, device, 
     attackers_ratio, attack_type, malicious_behavior_rate, rule, 
-    class_per_peer, samples_per_class, rate_unbalance, alpha, source_class, target_class, resume, log_file="experiment.log"):
+    class_per_peer, samples_per_class, rate_unbalance, alpha, source_class, target_class, resume, log_file="experiment.log",
+    attack_config=None):
     msg = f"\n--> Starting experiment..."
     print(msg)
     # 自动移除所有root logger的handler，确保日志切换生效
@@ -41,13 +42,20 @@ def run_exp(dataset_name, model_name, dd_type,
     msg = f"Malicious Behavior Rate: {malicious_behavior_rate*100} %"
     print(msg)
     logging.info(msg)
+    
+    # 添加攻击配置信息
+    if attack_config:
+        attack_scenario = attack_config.get('type', 'unknown')
+        msg = f"Attack Scenario: {attack_scenario}"
+    print(msg)
+    logging.info(msg)
     # flEnv.simulate(attack_type = attack_type, malicious_behavior_rate = malicious_behavior_rate,
     #                 from_class = from_class, to_class = to_class,
     #                  rule=rule)
     start_time = time.time()
     final_accuracy, final_asr = flEnv.run_experiment(attack_type = attack_type, malicious_behavior_rate = malicious_behavior_rate, 
                     source_class = source_class, target_class = target_class, 
-                    rule=rule, resume = resume, log_file=log_file)
+                    rule=rule, resume = resume, log_file=log_file, attack_config=attack_config)
     total_runtime = time.time() - start_time
     
     msg = f"\n--> End of Experiment."

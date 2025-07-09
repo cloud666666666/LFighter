@@ -30,8 +30,23 @@ def contains_class(dataset, source_class):
     return False
 
 # Prepare the dataset for label flipping attack from a target class to another class
-def label_filp(data, source_class, target_class):
-    poisoned_data = PoisonedDataset(data, source_class, target_class)
+def label_filp(data, source_class, target_class, attack_config=None, current_epoch=0, peer_id=None):
+    """
+    创建中毒数据集
+    Args:
+        data: 原始数据集
+        source_class: 源类别（兼容性参数）
+        target_class: 目标类别（兼容性参数）
+        attack_config: 复杂攻击配置字典
+        current_epoch: 当前轮次（用于时变攻击）
+        peer_id: 节点ID（用于攻击追踪）
+    """
+    if attack_config:
+        # 使用复杂攻击配置
+        poisoned_data = PoisonedDataset(data, source_class, target_class, attack_config, current_epoch, peer_id)
+    else:
+        # 兼容原有简单攻击
+        poisoned_data = PoisonedDataset(data, source_class, target_class, None, current_epoch, peer_id)
     return poisoned_data
 
 def flatten_updates(updates):
