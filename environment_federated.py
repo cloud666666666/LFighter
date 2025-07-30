@@ -405,10 +405,15 @@ class FL:
 
 #======================================= Start of testning function ===========================================================#
     def test(self, model, device, test_loader, dataset_name=None):
+        from sklearn.metrics import f1_score
+        
         model.eval()
         test_loss = []
         correct = 0
         n = 0
+        all_preds = []
+        all_targets = []
+        
         for batch_idx, (data, target) in enumerate(test_loader):
             data, target = data.to(self.device), target.to(self.device)
             output = model(data)
@@ -430,11 +435,29 @@ class FL:
             test_loss.append(loss.item())
             correct += (pred == target_acc).sum().item()
             n += target_acc.size(0)
+            
+            # 收集预测和真实标签用于F1 score计算
+            all_preds.extend(pred.cpu().numpy())
+            all_targets.extend(target_acc.cpu().numpy())
 
         test_loss = np.mean(test_loss) if test_loss else float('inf')
-        print('\nAverage test loss: {:.4f}, Test accuracy: {}/{} ({:.2f}%)\n'.format(
-            test_loss, correct, n, 100 * correct / n))
-        return 100.0 * (correct / n), test_loss
+        accuracy = 100.0 * (correct / n)
+        
+        # 计算F1 score
+        try:
+            if dataset_name == 'IMDB':
+                # 二分类F1 score
+                f1 = f1_score(all_targets, all_preds, average='binary') * 100
+            else:
+                # 多分类F1 score (macro average)
+                f1 = f1_score(all_targets, all_preds, average='macro') * 100
+        except:
+            f1 = 0.0
+        
+        print('\nAverage test loss: {:.4f}, Test accuracy: {}/{} ({:.2f}%), F1 Score: {:.2f}%\n'.format(
+            test_loss, correct, n, accuracy, f1))
+        
+        return accuracy, test_loss, f1
     #======================================= End of testning function =============================================================#
 #Test label prediction function    
     def test_label_predictions(self, model, device, test_loader, dataset_name = None):
@@ -505,6 +528,7 @@ class FL:
         last10_updates = []
         test_losses = []
         global_accuracies = []
+        global_f1_scores = []
         source_class_accuracies = []
         cpu_runtimes = []
         noise_scalar = 1.0
@@ -522,6 +546,7 @@ class FL:
             last10_updates = checkpoint['last10_updates']
             test_losses = checkpoint['test_losses']
             global_accuracies = checkpoint['global_accuracies']
+            global_f1_scores = checkpoint.get('global_f1_scores', [])
             source_class_accuracies = checkpoint['source_class_accuracies']
             
             print('>>checkpoint loaded!')
@@ -674,7 +699,7 @@ class FL:
             if epoch >= self.global_rounds-10:
                 last10_updates.append(global_weights) 
 
-            current_accuracy, test_loss = self.test(simulation_model, self.device, self.test_loader, dataset_name=self.dataset_name)
+            current_accuracy, test_loss, current_f1 = self.test(simulation_model, self.device, self.test_loader, dataset_name=self.dataset_name)
             
             # 移除NaN检查回退机制 - 让真实错误显示
             
@@ -735,6 +760,7 @@ class FL:
                         break
             
             global_accuracies.append(np.round(current_accuracy, 2))
+            global_f1_scores.append(np.round(current_f1, 2))
             test_losses.append(np.round(test_loss, 4))
             performed_attacks.append(attacks) 
             
@@ -769,6 +795,7 @@ class FL:
                 'last10_updates':last10_updates,
                 'test_losses': test_losses,
                 'global_accuracies': global_accuracies,
+                'global_f1_scores': global_f1_scores,
                 'source_class_accuracies': source_class_accuracies
                 }
             savepath = './checkpoints/'+ self.dataset_name + '_' + self.model_name + '_' + self.dd_type + '_'+ rule + '_'+ str(self.attackers_ratio) + '_' + str(self.local_epochs) + '.t7'
@@ -819,8 +846,9 @@ class FL:
                 global_weights = average_weights(last10_updates, 
                 np.ones([len(last10_updates)]))
                 simulation_model.load_state_dict(global_weights) 
-                current_accuracy, test_loss = self.test(simulation_model, self.device, self.test_loader, dataset_name=self.dataset_name)
+                current_accuracy, test_loss, current_f1 = self.test(simulation_model, self.device, self.test_loader, dataset_name=self.dataset_name)
                 global_accuracies.append(np.round(current_accuracy, 2))
+                global_f1_scores.append(np.round(current_f1, 2))
                 test_losses.append(np.round(test_loss, 4))
                 performed_attacks.append(attacks)
                 print("***********************************************************************************")
@@ -930,6 +958,7 @@ class FL:
                 'state_dict': simulation_model.state_dict(),
                 'test_losses': test_losses,
                 'global_accuracies': global_accuracies,
+                'global_f1_scores': global_f1_scores,
                 'source_class_accuracies': source_class_accuracies,
                 'asr':asr,
                 'avg_cpu_runtime':np.mean(cpu_runtimes)

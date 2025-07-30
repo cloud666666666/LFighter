@@ -5,7 +5,7 @@ import torch.nn as nn
 #=============================== Defining global variables ========================#
 DATASET_NAME = "PATHMNIST"
 MODEL_NAME = "CNNPATHMNIST"  # 你需要在models.py中实现CNNMNIST模型
-DD_TYPE = 'NON_IID'
+DD_TYPE = 'IID'
 LOG_DIST_TYPE = DD_TYPE  # 新增：用于日志命名的分布类型（IID或NONIID）
 ALPHA = 1
 NUM_PEERS = 100     # 小规模测试：只用5个peer

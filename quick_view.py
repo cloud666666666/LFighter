@@ -78,6 +78,17 @@ def load_single_result(file_path):
             print(f"📈 Overall Accuracy:             N/A")
             overall_accuracy = 0
         
+        # 1.1. Global F1 Scores (从模型直接读取)
+        if 'global_f1_scores' in result and result['global_f1_scores']:
+            f1_scores = result['global_f1_scores']
+            clean_f1_scores = [float(f1) for f1 in f1_scores]
+            overall_f1 = clean_f1_scores[-1]
+            print(f"🎯 Overall F1 Score (Final):     {overall_f1:.2f}%")
+            print(f"📊 Global F1 Scores (All):       {clean_f1_scores}")
+        else:
+            print(f"🎯 Overall F1 Score:             N/A")
+            overall_f1 = 0
+        
         # 2. Source Class Accuracies (从模型直接读取)
         if 'source_class_accuracies' in result and result['source_class_accuracies']:
             source_accs = result['source_class_accuracies']
@@ -130,15 +141,16 @@ def load_single_result(file_path):
         else:
             print(f"⏱️  Average Time:                N/A (Not saved in model)")
         
-        # 📊 Summary of 5 Core Metrics
-        print(f"\n📊 Five Core Metrics Summary:")
+        # 📊 Summary of 6 Core Metrics
+        print(f"\n📊 Six Core Metrics Summary:")
         print("-" * 50)
         print(f"1. Test Error (TE):               {test_error:.4f}" if 'test_error' in locals() else "1. Test Error (TE):               N/A")
         print(f"2. Overall Accuracy:              {overall_accuracy:.2f}%")
-        print(f"3. Source Class Accuracy:         {final_source_acc:.2f}%" if 'final_source_acc' in locals() else "3. Source Class Accuracy:         N/A")
-        print(f"4. Attack Success Rate (ASR):     {asr_value:.2f}%" if 'asr_value' in locals() else "4. Attack Success Rate (ASR):     N/A")
-        print(f"5. Coefficient of Variation:      {cov_src_acc:.2f}%" if 'cov_src_acc' in locals() else "5. Coefficient of Variation:      N/A")
-        print(f"6. Average Time:                  {runtime:.3f}s" if 'runtime' in locals() and runtime > 0 else "6. Average Time:                  N/A")
+        print(f"3. Overall F1 Score:              {overall_f1:.2f}%")
+        print(f"4. Source Class Accuracy:         {final_source_acc:.2f}%" if 'final_source_acc' in locals() else "4. Source Class Accuracy:         N/A")
+        print(f"5. Attack Success Rate (ASR):     {asr_value:.2f}%" if 'asr_value' in locals() else "5. Attack Success Rate (ASR):     N/A")
+        print(f"6. Coefficient of Variation:      {cov_src_acc:.2f}%" if 'cov_src_acc' in locals() else "6. Coefficient of Variation:      N/A")
+        print(f"7. Average Time:                  {runtime:.3f}s" if 'runtime' in locals() and runtime > 0 else "7. Average Time:                  N/A")
         
         # 📋 Note about COV calculation
         if 'cov_src_acc' in locals():
@@ -214,6 +226,17 @@ def compare_rules(results_dir="./results"):
                     metrics['overall_accuracy'] = 0
                     metrics['avg_accuracy'] = 0
                     metrics['best_accuracy'] = 0
+                
+                # F1 Score
+                if 'global_f1_scores' in result and result['global_f1_scores']:
+                    f1_scores = [float(f1) for f1 in result['global_f1_scores']]
+                    metrics['overall_f1'] = f1_scores[-1]
+                    metrics['avg_f1'] = np.mean(f1_scores)
+                    metrics['best_f1'] = max(f1_scores)
+                else:
+                    metrics['overall_f1'] = 0
+                    metrics['avg_f1'] = 0
+                    metrics['best_f1'] = 0
                 
                 # Test Error (TE) - 从损失函数获取
                 if 'test_losses' in result and result['test_losses']:
@@ -328,7 +351,8 @@ def export_csv(results_dir="./results", output_file="experiment_results.csv"):
     import csv
     
     csv_rows = []
-    headers = ['Algorithm', 'Dataset', 'Distribution', 'Attacker_Ratio', 'Test_Error', 'Overall_Accuracy', 'Source_Acc', 'ASR', 'COV_Src_Acc', 'Avg_Time', 'Best_Accuracy', 'Final_Loss']
+    # 新的列顺序和名称
+    headers = ['Algorithm', 'Dataset', 'Distribution', 'Attacker_Ratio', 'Test_Error', 'Overall_Accuracy', 'Source_Acc', 'ASR', 'COV_Src_Acc', 'Avg_Time', 'Best_Accuracy', 'Final_Loss', 'rescontruction', 'cluster_method', 'F1-score']
     
     for file_path in t7_files:
         try:
@@ -362,19 +386,30 @@ def export_csv(results_dir="./results", output_file="experiment_results.csv"):
                         losses = [float(loss) for loss in result['test_losses']]
                         test_error = losses[-1]
                     
-                    row.extend([
-                        test_error,  # Test Error (from loss function)
-                        overall_acc,  # Overall Accuracy
-                    ])
+                    # F1 Score
+                    overall_f1 = 0
+                    best_f1 = 0
+                    if 'global_f1_scores' in result and result['global_f1_scores']:
+                        f1_scores = [float(f1) for f1 in result['global_f1_scores']]
+                        overall_f1 = f1_scores[-1] if f1_scores else 0
+                        best_f1 = max(f1_scores) if f1_scores else 0
+                    
+                    # Final Loss
+                    final_loss = 0
+                    if 'test_losses' in result and result['test_losses']:
+                        losses = [float(loss) for loss in result['test_losses']]
+                        final_loss = losses[-1]
                     
                     # Source-Acc
+                    source_acc = 0
                     if 'source_class_accuracies' in result and result['source_class_accuracies']:
                         source_accs = [float(acc) for acc in result['source_class_accuracies']]
-                        row.append(source_accs[-1] if source_accs else 0)
-                    else:
-                        row.append(0)
+                        source_acc = source_accs[-1] if source_accs else 0
                     
-                    # ASR, COV, Time
+                    # ASR
+                    asr = result.get('asr', 0)
+                    
+                    # COV
                     cov_src_acc = 0
                     if 'source_class_accuracies' in result and result['source_class_accuracies']:
                         source_accs = [float(acc) for acc in result['source_class_accuracies']]
@@ -389,19 +424,20 @@ def export_csv(results_dir="./results", output_file="experiment_results.csv"):
                         elif isinstance(runtime_raw, (int, float)):
                             avg_time = float(runtime_raw)
                     
+                    # 按照新的列顺序添加数据
                     row.extend([
-                        result.get('asr', 0),
-                        cov_src_acc,
-                        avg_time,
-                        max(accuracies),
+                        test_error,          # Test_Error
+                        overall_acc,         # Overall_Accuracy
+                        source_acc,          # Source_Acc
+                        asr,                 # ASR
+                        cov_src_acc,         # COV_Src_Acc
+                        avg_time,            # Avg_Time
+                        max(accuracies),     # Best_Accuracy
+                        final_loss,          # Final_Loss
+                        "",                  # rescontruction (空值，可以后续填充)
+                        "",                  # cluster_method (空值，可以后续填充)
+                        overall_f1           # F1-score
                     ])
-                    
-                    # Final Loss
-                    if 'test_losses' in result and result['test_losses']:
-                        losses = [float(loss) for loss in result['test_losses']]
-                        row.append(losses[-1])
-                    else:
-                        row.append(0)
                     
                     csv_rows.append(row)
                     

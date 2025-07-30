@@ -1755,7 +1755,7 @@ def Krum(updates, f, multi = False):
 ##################################################################
 
 class LFighterAutoencoder:
-    def __init__(self, num_classes, ae_hidden_dim=128, ae_latent_dim=32, ae_epochs=50, reconstruction_weight=0.2, 
+    def __init__(self, num_classes, ae_hidden_dim=128, ae_latent_dim=32, ae_epochs=50, reconstruction_weight=0.8, 
                  enable_visualization=True, save_path="./figures/", 
                  visualization_frequency=1, max_visualizations=0, save_final_only=False,
                  save_as_pdf=True, keep_individual_files=False, attack_ratio=None):
@@ -1779,7 +1779,7 @@ class LFighterAutoencoder:
             
         特性:
             - 使用输出层的全部梯度作为特征，而不是仅选择部分类别
-            - 通过自编码器进行特征降维和异常检测
+            - 通过传统自编码器进行特征降维和异常检测
             - 结合聚类和重构误差进行攻击者识别
             - 仅生成PDF报告，不生成单独文件
         """
@@ -2005,6 +2005,12 @@ Total Clients: {metrics.get('total_clients', 'N/A')}
 Good Clients Selected: {metrics.get('good_clients', 'N/A')}
 Selection Accuracy: {metrics.get('accuracy', 'N/A'):.2%}
 
+KMeans Clustering:
+• Method: {metrics.get('clustering_method', 'N/A')}
+• Number of Clusters: {metrics.get('n_clusters', 'N/A')}
+• Cluster Labels: {metrics.get('cluster_labels', 'N/A')}
+• Cluster Distribution: {metrics.get('cluster_counts', 'N/A')}
+
 Cluster Analysis:
 • Cluster 0 Dissimilarity: {metrics.get('cs0', 'N/A'):.4f}
 • Cluster 1 Dissimilarity: {metrics.get('cs1', 'N/A'):.4f}
@@ -2012,15 +2018,14 @@ Cluster Analysis:
 
 Feature Processing:
 • Reduction Method: {metrics.get('reduction_method', 'N/A')}
-• Selected Classes: {metrics.get('selected_classes', 'N/A')}
 • Attack Scope: {metrics.get('attack_scope', 'N/A')}
 • Attack Type: {metrics.get('attack_type', 'N/A')}
 
-Autoencoder:
+AE (Autoencoder):
 • Reconstruction Weight: {metrics.get('fixed_recon_weight', 'N/A'):.2f}
 • Mean Recon Error: {metrics.get('mean_recon_error', 'N/A'):.4f}
 
-Algorithm: LFighter + Autoencoder (Deep feature learning)
+Algorithm: LFighter + AE + KMeans
 Timestamp: {time.strftime('%Y-%m-%d %H:%M:%S')}
 """
             axes[1, 1].text(0.05, 0.95, metrics_text, transform=axes[1, 1].transAxes, 
@@ -2059,7 +2064,7 @@ Timestamp: {time.strftime('%Y-%m-%d %H:%M:%S')}
             plt.plot(losses, 'b-', linewidth=2, label='Reconstruction Loss')
             plt.xlabel('Epoch')
             plt.ylabel('Loss')
-            plt.title(f'Autoencoder Training Process (Round {round_num})')
+            plt.title(f'AE Training Process (Round {round_num})')
             plt.legend()
             plt.grid(True, alpha=0.3)
             plt.tight_layout()
@@ -2358,19 +2363,19 @@ Timestamp: {time.strftime('%Y-%m-%d %H:%M:%S')}
         return ds0, ds1
     
     def create_autoencoder(self, input_dim, device):
-        """创建autoencoder模型"""
-        class SimpleAutoencoder(nn.Module):
+        """创建AE模型"""
+        class AE(nn.Module):
             def __init__(self, input_dim, hidden_dim, latent_dim):
-                super(SimpleAutoencoder, self).__init__()
+                super(AE, self).__init__()
                 # 编码器
                 self.encoder = nn.Sequential(
                     nn.Linear(input_dim, hidden_dim),
                     nn.ReLU(),
                     nn.BatchNorm1d(hidden_dim),
                     nn.Dropout(0.1),
-                    nn.Linear(hidden_dim, latent_dim),
-                    nn.ReLU()
+                    nn.Linear(hidden_dim, latent_dim)
                 )
+                
                 # 解码器
                 self.decoder = nn.Sequential(
                     nn.Linear(latent_dim, hidden_dim),
@@ -2380,55 +2385,65 @@ Timestamp: {time.strftime('%Y-%m-%d %H:%M:%S')}
                     nn.Linear(hidden_dim, input_dim)
                 )
             
+            def encode(self, x):
+                return self.encoder(x)
+            
+            def decode(self, z):
+                return self.decoder(z)
+            
             def forward(self, x):
-                encoded = self.encoder(x)
-                decoded = self.decoder(encoded)
-                return encoded, decoded
+                z = self.encode(x)
+                decoded = self.decode(z)
+                return z, decoded
         
-        return SimpleAutoencoder(input_dim, self.ae_hidden_dim, self.ae_latent_dim).to(device)
+        return AE(input_dim, self.ae_hidden_dim, self.ae_latent_dim).to(device)
     
     def train_autoencoder(self, features, device):
-        """训练autoencoder并返回潜在表示和重构误差"""
+        """训练AE并返回潜在表示和重构误差"""
         features_tensor = torch.FloatTensor(features).to(device)
         input_dim = features_tensor.shape[1]
         
-        # 创建autoencoder
-        autoencoder = self.create_autoencoder(input_dim, device)
-        optimizer = optim.Adam(autoencoder.parameters(), lr=0.001, weight_decay=1e-5)
-        criterion = nn.MSELoss()
+        # 创建AE
+        ae = self.create_autoencoder(input_dim, device)
+        optimizer = optim.Adam(ae.parameters(), lr=0.001, weight_decay=1e-5)
+        
+        # AE损失函数 - 只有重构损失
+        criterion = nn.MSELoss(reduction='mean')
         
         # 记录训练损失用于可视化
         training_losses = []
         
-        # 训练autoencoder
-        autoencoder.train()
+        # 训练AE
+        ae.train()
         for epoch in range(self.ae_epochs):
             optimizer.zero_grad()
-            encoded, decoded = autoencoder(features_tensor)
-            loss = criterion(decoded, features_tensor)
-            loss.backward()
+            z, decoded = ae(features_tensor)
+            
+            # 计算重构损失
+            recon_loss = criterion(decoded, features_tensor)
+            recon_loss.backward()
             optimizer.step()
             
             # 记录损失
-            training_losses.append(loss.item())
+            training_losses.append(recon_loss.item())
             
             if epoch % 10 == 0:
-                print(f'[LFighter-AE] Autoencoder Epoch {epoch+1}/{self.ae_epochs}: Loss={loss.item():.6f}')
+                print(f'[LFighter-AE] AE Epoch {epoch+1}/{self.ae_epochs}: Recon Loss={recon_loss.item():.6f}')
         
         # 可视化训练过程
         if self.should_visualize_this_round():
             self.visualize_training_process(training_losses, self.round_counter)
         
         # 获取潜在表示和重构误差
-        autoencoder.eval()
+        ae.eval()
         with torch.no_grad():
-            encoded, decoded = autoencoder(features_tensor)
+            z, decoded = ae(features_tensor)
             reconstruction_errors = torch.mean((features_tensor - decoded) ** 2, dim=1)
         
-        return encoded.cpu().numpy(), reconstruction_errors.cpu().numpy(), training_losses[-1]
+        return z.cpu().numpy(), reconstruction_errors.cpu().numpy(), training_losses[-1]
     
     def aggregate(self, global_model, local_models, ptypes):
-        """基于LFighter + Autoencoder的聚合方法"""
+        """基于LFighter + 传统Autoencoder的聚合方法"""
         import config
         device = getattr(config, 'DEVICE', 'cpu')
         
@@ -2465,14 +2480,22 @@ Timestamp: {time.strftime('%Y-%m-%d %H:%M:%S')}
             # 使用autoencoder进行特征学习
             latent_features, reconstruction_errors, final_loss = self.train_autoencoder(data, device)
             
-            # 原始K-means聚类（在潜在空间中）
-            kmeans = KMeans(n_clusters=2, random_state=0).fit(latent_features)
-            labels = kmeans.labels_
-
+            # Use KMeans clustering (in latent space)
+            from sklearn.cluster import KMeans
+            
+            # KMeans聚类 (n_clusters=2)
+            kmeans = KMeans(n_clusters=2, random_state=42, n_init=10)
+            labels = kmeans.fit_predict(latent_features)
+            
+            print(f'[LFighter-AE] KMeans聚类: 2个聚类')
+            print(f'[LFighter-AE] 聚类标签分布: {np.unique(labels)}')
+            print(f'[LFighter-AE] 各标签数量: {[np.sum(labels == label) for label in [0, 1]]}')
+            
+            # 构建聚类用于质量评估
             clusters = {0: [], 1: []}
             for i, l in enumerate(labels):
                 clusters[l].append(latent_features[i])
-
+            
             # 聚类质量评估
             good_cl = 0
             cs0, cs1 = self.clusters_dissimilarity(clusters)
@@ -2510,7 +2533,12 @@ Timestamp: {time.strftime('%Y-%m-%d %H:%M:%S')}
                     'final_loss': final_loss,
                     'reduction_method': 'Binary classification',
                     'attack_type': 'Binary classification mode',
-                    'fixed_recon_weight': self.reconstruction_weight
+                    'fixed_recon_weight': self.reconstruction_weight,
+                    # KMeans配置信息
+                    'clustering_method': 'KMeans',
+                    'n_clusters': 2,
+                    'cluster_labels': str([0, 1]),
+                    'cluster_counts': str([np.sum(labels == label) for label in [0, 1]])
                 }
                 
                 # 仅生成PDF报告，不生成单独的图片和文本文件
@@ -2613,14 +2641,22 @@ Timestamp: {time.strftime('%Y-%m-%d %H:%M:%S')}
         # 使用autoencoder进行深度特征学习
         latent_features, reconstruction_errors, final_loss = self.train_autoencoder(data_reduced, device)
         
-        # 在潜在空间中进行聚类
-        kmeans = KMeans(n_clusters=2, random_state=0).fit(latent_features)
-        labels = kmeans.labels_
-
+        # Use KMeans clustering (in latent space)
+        from sklearn.cluster import KMeans
+        
+        # KMeans聚类 (n_clusters=2)
+        kmeans = KMeans(n_clusters=2, random_state=42, n_init=10)
+        labels = kmeans.fit_predict(latent_features)
+        
+        print(f'[LFighter-AE] KMeans聚类: 2个聚类')
+        print(f'[LFighter-AE] 聚类标签分布: {np.unique(labels)}')
+        print(f'[LFighter-AE] 各标签数量: {[np.sum(labels == label) for label in [0, 1]]}')
+        
+        # 构建聚类用于质量评估
         clusters = {0: [], 1: []}
         for i, l in enumerate(labels):
             clusters[l].append(latent_features[i])
-
+        
         # 聚类质量评估
         good_cl = 0
         cs0, cs1 = self.clusters_dissimilarity(clusters)
@@ -2676,7 +2712,12 @@ Timestamp: {time.strftime('%Y-%m-%d %H:%M:%S')}
                 'attack_type': attack_analysis['attack_type'],
                 'attack_confidence': attack_analysis['confidence'],
                 'attack_description': attack_analysis['pattern_description'],
-                'fixed_recon_weight': self.reconstruction_weight
+                'fixed_recon_weight': self.reconstruction_weight,
+                # KMeans配置信息
+                'clustering_method': 'KMeans',
+                'n_clusters': 2,
+                'cluster_labels': str([0, 1]),
+                'cluster_counts': str([np.sum(labels == label) for label in [0, 1]])
             }
             
             # 仅生成PDF报告，不生成单独的图片和文本文件
