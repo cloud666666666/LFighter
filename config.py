@@ -3,9 +3,9 @@ import random
 import torch.nn as nn
 
 #=============================== Defining global variables ========================#
-DATASET_NAME = "PATHMNIST"
-MODEL_NAME = "CNNPATHMNIST"  # 你需要在models.py中实现CNNMNIST模型
-DD_TYPE = 'IID'
+DATASET_NAME = "BLOODMNIST"  # 修改为BloodMNIST
+MODEL_NAME = "CNNBLOODMNIST"  # 使用新模型
+DD_TYPE = 'NON_IID'
 LOG_DIST_TYPE = DD_TYPE  # 新增：用于日志命名的分布类型（IID或NONIID）
 ALPHA = 1
 NUM_PEERS = 100     # 小规模测试：只用5个peer
@@ -29,23 +29,22 @@ TEST_BATCH_SIZE = 1000 # 减少测试批次大小
 LOCAL_BS = 64      # 减少批次大小
 LOCAL_LR =  0.01   # 保持学习率
 LOCAL_MOMENTUM = 0.9 #local momentum for each peer
-NUM_CLASSES = 9 # PATHMNIST有9类
+NUM_CLASSES = 8 # BloodMNIST有8类
 LABELS_DICT = {
-    0: 'Adipose',
-    1: 'Background',
-    2: 'Debris',
-    3: 'Lymphocytes',
-    4: 'Mucus',
-    5: 'Smooth muscle',
-    6: 'Normal colon mucosa',
-    7: 'Cancer-associated stroma',
-    8: 'Colorectal adenocarcinoma epithelium'
+    0: 'Basophil',
+    1: 'Eosinophil',
+    2: 'Erythroblast',
+    3: 'Immature granulocytes',
+    4: 'Lymphocyte',
+    5: 'Monocyte',
+    6: 'Neutrophil',
+    7: 'Platelet'
 }
 
 SOURCE_CLASS = 3 
 TARGET_CLASS = 5 
 
-CLASS_PER_PEER = 9  # 每个peer拥有的类别数，建议与NUM_CLASSES一致
+CLASS_PER_PEER = 8  # 每个peer拥有的类别数，与BloodMNIST的NUM_CLASSES一致
 SAMPLES_PER_CLASS = 582  # 小规模测试：每类只用100个样本
 RATE_UNBALANCE = 1
 
@@ -65,15 +64,14 @@ SIMPLE_ATTACK = {
 MULTI_TARGET_ATTACK = {
     'type': 'multi_target',
     'mappings': {
-        0: 1,  # Adipose → Background
-        1: 2,  # Background → Debris
-        2: 3,  # Debris → Lymphocytes
-        3: 4,  # Lymphocytes → Mucus
-        4: 5,  # Mucus → Smooth muscle
-        5: 6,  # Smooth muscle → Normal colon mucosa
-        6: 7,  # Normal colon mucosa → Cancer-associated stroma
-        7: 8,  # Cancer-associated stroma → Colorectal adenocarcinoma
-        8: 0   # Colorectal adenocarcinoma → Adipose (循环移位)
+        0: 1,  # Basophil → Eosinophil
+        1: 2,  # Eosinophil → Erythroblast
+        2: 3,  # Erythroblast → Immature granulocytes
+        3: 4,  # Immature granulocytes → Lymphocyte
+        4: 5,  # Lymphocyte → Monocyte
+        5: 6,  # Monocyte → Neutrophil
+        6: 7,  # Neutrophil → Platelet
+        7: 0   # Platelet → Basophil (循环移位)
     },
     'flip_probabilities': {
         0: 0.95,  # 高概率翻转，确保攻击效果明显
@@ -83,8 +81,7 @@ MULTI_TARGET_ATTACK = {
         4: 0.95,
         5: 0.95,
         6: 0.95,
-        7: 0.95,
-        8: 0.95
+        7: 0.95
     }
 }
 

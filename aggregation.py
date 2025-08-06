@@ -1755,7 +1755,7 @@ def Krum(updates, f, multi = False):
 ##################################################################
 
 class LFighterAutoencoder:
-    def __init__(self, num_classes, ae_hidden_dim=128, ae_latent_dim=32, ae_epochs=50, reconstruction_weight=0.8, 
+    def __init__(self, num_classes, ae_hidden_dim=128, ae_latent_dim=32, ae_epochs=50, reconstruction_weight=0.2, 
                  enable_visualization=True, save_path="./figures/", 
                  visualization_frequency=1, max_visualizations=0, save_final_only=False,
                  save_as_pdf=True, keep_individual_files=False, attack_ratio=None):

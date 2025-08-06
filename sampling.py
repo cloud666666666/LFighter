@@ -13,11 +13,11 @@ import codecs
 import tensorflow as tf 
 import pandas as pd
 from datasets import *
-from medmnist import PathMNIST
+from medmnist import PathMNIST, BloodMNIST
 from medmnist import INFO
 import importlib
 
-#添加PATHMNIST加载函数
+#添加PATHMNIST和BloodMNIST加载函数
 config = importlib.import_module('config')
 
 def get_pathmnist():
@@ -25,6 +25,22 @@ def get_pathmnist():
     data_flag = 'pathmnist'
     info = INFO[data_flag]
     DataClass = PathMNIST
+    # 还原为三通道RGB
+    resize_shape = (28, 28)
+    transform = transforms.Compose([
+        transforms.Resize(resize_shape),
+        transforms.ToTensor(),
+        transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
+    ])
+    trainset = DataClass(split='train', root='./data', transform=transform, download=True)
+    testset = DataClass(split='test', root='./data', transform=transform, download=True)
+    return trainset, testset
+
+def get_bloodmnist():
+    import torchvision.transforms as transforms
+    data_flag = 'bloodmnist'
+    info = INFO[data_flag]
+    DataClass = BloodMNIST
     # 还原为三通道RGB
     resize_shape = (28, 28)
     transform = transforms.Compose([
@@ -48,6 +64,8 @@ alpha = 1):
         trainset, testset, tokenizer = get_imdb(num_peers = num_peers)
     elif dataset_name == 'PATHMNIST':
         trainset, testset = get_pathmnist()
+    elif dataset_name == 'BLOODMNIST':
+        trainset, testset = get_bloodmnist()
     if dd_type == 'IID':
         peers_data_dict = sample_dirichlet(trainset, num_peers, alpha=1000000)
     elif dd_type == 'NON_IID':
