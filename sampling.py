@@ -13,7 +13,7 @@ import codecs
 import tensorflow as tf 
 import pandas as pd
 from datasets import *
-from medmnist import PathMNIST, BloodMNIST
+from medmnist import PathMNIST, BloodMNIST, OrganAMNIST
 from medmnist import INFO
 import importlib
 
@@ -52,6 +52,22 @@ def get_bloodmnist():
     testset = DataClass(split='test', root='./data', transform=transform, download=True)
     return trainset, testset
 
+def get_organamnist():
+    import torchvision.transforms as transforms
+    data_flag = 'organamnist'
+    info = INFO[data_flag]
+    DataClass = OrganAMNIST
+    # OrganMNIST是单通道灰度图像
+    resize_shape = (28, 28)
+    transform = transforms.Compose([
+        transforms.Resize(resize_shape),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[.5], std=[.5])
+    ])
+    trainset = DataClass(split='train', root='./data', transform=transform, download=True)
+    testset = DataClass(split='test', root='./data', transform=transform, download=True)
+    return trainset, testset
+
 def distribute_dataset(dataset_name, num_peers, num_classes, dd_type = 'IID', classes_per_peer = 1, samples_per_class = 582, 
 alpha = 1):
     print("--> Loading of {} dataset".format(dataset_name))
@@ -66,6 +82,8 @@ alpha = 1):
         trainset, testset = get_pathmnist()
     elif dataset_name == 'BLOODMNIST':
         trainset, testset = get_bloodmnist()
+    elif dataset_name == 'ORGANAMNIST':
+        trainset, testset = get_organamnist()
     if dd_type == 'IID':
         peers_data_dict = sample_dirichlet(trainset, num_peers, alpha=1000000)
     elif dd_type == 'NON_IID':

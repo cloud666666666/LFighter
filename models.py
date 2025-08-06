@@ -121,6 +121,32 @@ class CNNBLOODMNIST(nn.Module):
             features = [input_flat, first_layer_activation, logits]
             return features, logits
         return logits
+        
+class CNNORGANAMNIST(nn.Module):
+    def __init__(self):
+        super(CNNORGANAMNIST, self).__init__()
+        # 适用于OrganAMNIST的架构，输出层为11个类别
+        super().__init__()
+        self.conv1 = nn.Conv2d(1, 32, 3, 1)  # 1通道输入（灰度图）
+        self.conv2 = nn.Conv2d(32, 64, 3, 1)
+        self.fc1 = nn.Linear(9216, 128)
+        self.fc2 = nn.Linear(128, 11)  # OrganAMNIST有11个类别
+    def forward(self, x, return_features=False):
+        input_flat = x.view(x.size(0), -1)  # 原始输入视图（flatten）
+
+        x = F.relu(self.conv1(x))
+        first_layer_activation = x.view(x.size(0), -1)  # 第一层激活视图
+
+        x = F.relu(self.conv2(x))
+        x = F.max_pool2d(x, 2)                         # -> 64 x 12 x 12
+        x = torch.flatten(x, 1)
+        x = F.relu(self.fc1(x))
+        logits = self.fc2(x)
+
+        if return_features:
+            features = [input_flat, first_layer_activation, logits]
+            return features, logits
+        return logits
 
 
 class Block(nn.Module):
@@ -184,6 +210,7 @@ def setup_model(model_architecture, num_classes = None, tokenizer = None, embedd
         "CNNMNIST": CNNMNIST,
         "CNNPATHMNIST": CNNPATHMNIST,
         "CNNBLOODMNIST": CNNBLOODMNIST,
+        "CNNORGANAMNIST": CNNORGANAMNIST,
         "BiLSTM": BiLSTM,
         "ResNet18" : tv.models.resnet18,
         "VGG16" : tv.models.vgg16,
